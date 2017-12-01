@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-kit/kit/log"
@@ -42,6 +43,7 @@ type TimestampCollector struct {
 	index       int
 	filenames   []string
 	Description *prometheus.Desc
+	lock        sync.RWMutex
 
 	logger log.Logger
 }
@@ -53,12 +55,16 @@ func (t *TimestampCollector) Describe(ch chan<- *prometheus.Desc) {
 
 // SetFiles changes the filenames of the struct to the paths returned by listfiles().
 func (t *TimestampCollector) SetFiles(files []string) {
+	t.lock.Lock()
 	t.filenames = files
+	t.lock.Unlock()
 }
 
 // Collect creates constant metrics for each file with last modified time of the file.
 func (t *TimestampCollector) Collect(ch chan<- prometheus.Metric) {
+	t.lock.RLock()
 	files := t.filenames
+	t.lock.RUnlock()
 	for i := 0; i < len(files); i++ {
 		info, err := os.Stat(files[i])
 		if err != nil {
