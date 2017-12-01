@@ -21,6 +21,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -38,6 +39,7 @@ const fileSDFilepathLabel = model.MetaLabelPrefix + "filepath"
 
 // TimestampCollector is a Custom Collector for Timestamps of the files.
 type TimestampCollector struct {
+	index       int
 	filenames   []string
 	Description *prometheus.Desc
 
@@ -60,7 +62,7 @@ func (t *TimestampCollector) Collect(ch chan<- prometheus.Metric) {
 	for i := 0; i < len(files); i++ {
 		info, err := os.Stat(files[i])
 		if err != nil {
-			t.logger.Errorf("Error getting the fileinfo of the file %q: %s", files[i], err)
+			level.Error(t.logger).Log("msg", "Error getting fileinfo", "filename", files[i], "err", err)
 			continue
 		}
 		ch <- prometheus.MustNewConstMetric(
@@ -73,13 +75,13 @@ func (t *TimestampCollector) Collect(ch chan<- prometheus.Metric) {
 }
 
 // NewTimestampCollector creates a TimestampCollector.
-func NewTimestampCollector() *TimestampCollector {
+func NewTimestampCollector(i int) *TimestampCollector {
 	return &TimestampCollector{
 		Description: prometheus.NewDesc(
 			"prometheus_sd_file_timestamp",
 			"Timestamp of files read by FileSD",
 			[]string{"filename"},
-			nil,
+			prometheus.Labels{"file_sd_index": strconv.Itoa(i)},
 		),
 	}
 }
@@ -95,22 +97,21 @@ var (
 			Name: "prometheus_sd_file_read_errors_total",
 			Help: "The number of File-SD read errors.",
 		})
-	fileSDTimeStamp = NewTimestampCollector()
 )
 
 func init() {
 	prometheus.MustRegister(fileSDScanDuration)
 	prometheus.MustRegister(fileSDReadErrorsCount)
-	prometheus.MustRegister(fileSDTimeStamp)
 }
 
 // Discovery provides service discovery functionality based
 // on files that contain target groups in JSON or YAML format. Refreshing
 // happens using file watches and periodic refreshes.
 type Discovery struct {
-	paths    []string
-	watcher  *fsnotify.Watcher
-	interval time.Duration
+	paths      []string
+	watcher    *fsnotify.Watcher
+	interval   time.Duration
+	timestamps *TimestampCollector
 
 	// lastRefresh stores which files were found during the last refresh
 	// and how many target groups they contained.
@@ -120,14 +121,18 @@ type Discovery struct {
 }
 
 // NewDiscovery returns a new file discovery for the given paths.
-func NewDiscovery(conf *config.FileSDConfig, logger log.Logger) *Discovery {
+func NewDiscovery(conf *config.FileSDConfig, logger log.Logger, i int) *Discovery {
 	if logger == nil {
 		logger = log.NewNopLogger()
 	}
+	timestamps := NewTimestampCollector(i)
+	timestamps.logger = logger
+	prometheus.MustRegister(timestamps)
 	return &Discovery{
-		paths:    conf.Files,
-		interval: time.Duration(conf.RefreshInterval),
-		logger:   logger,
+		paths:      conf.Files,
+		interval:   time.Duration(conf.RefreshInterval),
+		logger:     logger,
+		timestamps: timestamps,
 	}
 }
 
@@ -247,7 +252,7 @@ func (d *Discovery) refresh(ctx context.Context, ch chan<- []*config.TargetGroup
 		fileSDScanDuration.Observe(time.Since(t0).Seconds())
 	}()
 
-	fileSDTimeStamp.SetFiles(d.listFiles())
+	d.timestamps.SetFiles(d.listFiles())
 	ref := map[string]int{}
 	for _, p := range d.listFiles() {
 		tgroups, err := readFile(p)
