@@ -40,11 +40,9 @@ const fileSDFilepathLabel = model.MetaLabelPrefix + "filepath"
 // TimestampCollector is a Custom Collector for Timestamps of the files.
 type TimestampCollector struct {
 	index       int
-	filenames   map[string]struct{}
+	timestamps  map[int]map[string]float64
 	Description *prometheus.Desc
 	lock        sync.RWMutex
-
-	logger log.Logger
 }
 
 // Describe method sends the description to the channel.
@@ -52,39 +50,54 @@ func (t *TimestampCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- t.Description
 }
 
-// SetFiles adds the filenames of the struct's map to the paths returned by listfiles().
-func (t *TimestampCollector) SetFiles(files []string) {
+// ResetMap is called in FileSD.refresh. Since we start from scratch with the file_sd and then
+// compare the new list of files to the old one to update TargetGroups, we can do the same with
+// the map of files that the TimestampCollector knows about.
+func (t *TimestampCollector) ResetMap() {
 	t.lock.Lock()
-	for _, file := range files {
-		t.filenames[file] = struct{}{}
-	}
+	// t.timestamps = make(map[string]float64)
 	t.lock.Unlock()
 }
 
-// DeleteFile deletes a key from the filenames map. Go's delete does nothing if the key does not exist.
-func (t *TimestampCollector) DeleteFile(file string) {
+// DeleteTimestamp deletes the timestamp for a given filename from the timestamps map.
+func (t *TimestampCollector) DeleteTimestamp(index int, filename string) {
 	t.lock.Lock()
-	delete(t.filenames, file)
+	delete(t.timestamps[index], filename)
 	t.lock.Unlock()
-	level.Error(t.logger).Log("msg", "deleting file from timestamp collector", "file", file)
+}
+
+// SetTimestamp sets the timestamp for a given filename.
+func (t *TimestampCollector) SetTimestamp(index int, filename string, timestamp float64) {
+	t.lock.Lock()
+	if t.timestamps[index] == nil {
+		t.timestamps[index] = make(map[string]float64)
+	}
+	t.timestamps[index][filename] = timestamp
+	t.lock.Unlock()
 }
 
 // Collect creates constant metrics for each file with last modified time of the file.
 func (t *TimestampCollector) Collect(ch chan<- prometheus.Metric) {
 	t.lock.RLock()
-	files := t.filenames
+	timestamps := t.timestamps
 	t.lock.RUnlock()
-	for k := range files {
-		info, err := os.Stat(k)
-		if err != nil {
-			level.Error(t.logger).Log("msg", "Error getting fileinfo", "file", k, "err", err)
-			continue
+	// new map to dedup dilenames
+	uniqueFiles := make(map[string]float64)
+
+	for fileSD := range timestamps {
+		for filename := range timestamps[fileSD] {
+			// if _, ok := uniqueFiles[filename]; !ok {
+			// 	uni
+			// }
+			uniqueFiles[filename] = timestamps[fileSD][filename]
 		}
+	}
+	for filename := range uniqueFiles {
 		ch <- prometheus.MustNewConstMetric(
 			t.Description,
 			prometheus.GaugeValue,
-			float64(info.ModTime().Unix()),
-			k,
+			uniqueFiles[filename],
+			filename,
 		)
 	}
 }
@@ -94,11 +107,11 @@ func NewTimestampCollector() *TimestampCollector {
 	return &TimestampCollector{
 		Description: prometheus.NewDesc(
 			"prometheus_sd_file_timestamp",
-			"Timestamp of files read by FileSD",
+			"Timestamp of files read by FileSD. Timestamp is set at read time.",
 			[]string{"filename"},
 			nil,
 		),
-		filenames: make(map[string]struct{}),
+		timestamps: make(map[int]map[string]float64),
 	}
 }
 
@@ -126,6 +139,7 @@ func init() {
 // on files that contain target groups in JSON or YAML format. Refreshing
 // happens using file watches and periodic refreshes.
 type Discovery struct {
+	index    int
 	paths    []string
 	watcher  *fsnotify.Watcher
 	interval time.Duration
@@ -138,12 +152,13 @@ type Discovery struct {
 }
 
 // NewDiscovery returns a new file discovery for the given paths.
-func NewDiscovery(conf *config.FileSDConfig, logger log.Logger) *Discovery {
+func NewDiscovery(conf *config.FileSDConfig, logger log.Logger, index int) *Discovery {
 	if logger == nil {
 		logger = log.NewNopLogger()
 	}
-	fileSDTimeStamp.logger = logger
+
 	return &Discovery{
+		index:    index,
 		paths:    conf.Files,
 		interval: time.Duration(conf.RefreshInterval),
 		logger:   logger,
@@ -265,10 +280,9 @@ func (d *Discovery) refresh(ctx context.Context, ch chan<- []*config.TargetGroup
 	defer func() {
 		fileSDScanDuration.Observe(time.Since(t0).Seconds())
 	}()
-	fileSDTimeStamp.SetFiles(d.listFiles())
 	ref := map[string]int{}
 	for _, p := range d.listFiles() {
-		tgroups, err := readFile(p)
+		tgroups, err := readFile(d.index, p)
 		if err != nil {
 			fileSDReadErrorsCount.Inc()
 
@@ -289,9 +303,8 @@ func (d *Discovery) refresh(ctx context.Context, ch chan<- []*config.TargetGroup
 	for f, n := range d.lastRefresh {
 		m, ok := ref[f]
 		if !ok || n > m {
+			fileSDTimeStamp.DeleteTimestamp(d.index, f)
 			level.Error(d.logger).Log("msg", "file_sd refresh found file that should be removed", "file", f)
-			// Remove from file sd timestamp collector.
-			fileSDTimeStamp.DeleteFile(f)
 			for i := m; i < n; i++ {
 				select {
 				case ch <- []*config.TargetGroup{{Source: fileSource(f, i)}}:
@@ -313,11 +326,20 @@ func fileSource(filename string, i int) string {
 
 // readFile reads a JSON or YAML list of targets groups from the file, depending on its
 // file extension. It returns full configuration target groups.
-func readFile(filename string) ([]*config.TargetGroup, error) {
+func readFile(index int, filename string) ([]*config.TargetGroup, error) {
 	content, err := ioutil.ReadFile(filename)
 	if err != nil {
 		return nil, err
 	}
+
+	// We use a mutex when setting timestamp, so don't block the rest of readFile.
+	go func() {
+		info, err := os.Stat(filename)
+		if err != nil {
+			return
+		}
+		fileSDTimeStamp.SetTimestamp(index, filename, float64(info.ModTime().Unix()))
+	}()
 
 	var targetGroups []*config.TargetGroup
 

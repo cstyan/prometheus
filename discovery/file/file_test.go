@@ -47,7 +47,7 @@ func testFileSD(t *testing.T, prefix, ext string, expect bool) {
 	conf.RefreshInterval = model.Duration(1 * time.Hour)
 
 	var (
-		fsd         = NewDiscovery(&conf, nil)
+		fsd         = NewDiscovery(&conf, nil, 0)
 		ch          = make(chan []*config.TargetGroup)
 		ctx, cancel = context.WithCancel(context.Background())
 	)
