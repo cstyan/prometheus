@@ -50,24 +50,15 @@ func (t *TimestampCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- t.Description
 }
 
-// ResetMap is called in FileSD.refresh. Since we start from scratch with the file_sd and then
-// compare the new list of files to the old one to update TargetGroups, we can do the same with
-// the map of files that the TimestampCollector knows about.
-func (t *TimestampCollector) ResetMap() {
-	t.lock.Lock()
-	// t.timestamps = make(map[string]float64)
-	t.lock.Unlock()
-}
-
 // DeleteTimestamp deletes the timestamp for a given filename from the timestamps map.
-func (t *TimestampCollector) DeleteTimestamp(index int, filename string) {
+func (t *TimestampCollector) deleteTimestamp(index int, filename string) {
 	t.lock.Lock()
 	delete(t.timestamps[index], filename)
 	t.lock.Unlock()
 }
 
 // SetTimestamp sets the timestamp for a given filename.
-func (t *TimestampCollector) SetTimestamp(index int, filename string, timestamp float64) {
+func (t *TimestampCollector) setTimestamp(index int, filename string, timestamp float64) {
 	t.lock.Lock()
 	if t.timestamps[index] == nil {
 		t.timestamps[index] = make(map[string]float64)
@@ -303,7 +294,7 @@ func (d *Discovery) refresh(ctx context.Context, ch chan<- []*config.TargetGroup
 	for f, n := range d.lastRefresh {
 		m, ok := ref[f]
 		if !ok || n > m {
-			fileSDTimeStamp.DeleteTimestamp(d.index, f)
+			fileSDTimeStamp.deleteTimestamp(d.index, f)
 			level.Error(d.logger).Log("msg", "file_sd refresh found file that should be removed", "file", f)
 			for i := m; i < n; i++ {
 				select {
@@ -338,7 +329,7 @@ func readFile(index int, filename string) ([]*config.TargetGroup, error) {
 		if err != nil {
 			return
 		}
-		fileSDTimeStamp.SetTimestamp(index, filename, float64(info.ModTime().Unix()))
+		fileSDTimeStamp.setTimestamp(index, filename, float64(info.ModTime().Unix()))
 	}()
 
 	var targetGroups []*config.TargetGroup
