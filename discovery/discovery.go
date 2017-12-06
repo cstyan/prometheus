@@ -63,7 +63,7 @@ func ProvidersFromConfig(cfg config.ServiceDiscoveryConfig, logger log.Logger) m
 		app("dns", i, dns.NewDiscovery(c, log.With(logger, "discovery", "dns")))
 	}
 	for i, c := range cfg.FileSDConfigs {
-		app("file", i, file.NewDiscovery(c, log.With(logger, "discovery", "file"), i))
+		app("file", i, file.NewDiscovery(c, log.With(logger, "discovery", "file")))
 	}
 	for i, c := range cfg.ConsulSDConfigs {
 		k, err := consul.NewDiscovery(c, log.With(logger, "discovery", "consul"))

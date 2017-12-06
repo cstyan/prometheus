@@ -105,7 +105,6 @@ func init() {
 // on files that contain target groups in JSON or YAML format. Refreshing
 // happens using file watches and periodic refreshes.
 type Discovery struct {
-	index      int
 	paths      []string
 	watcher    *fsnotify.Watcher
 	interval   time.Duration
@@ -120,13 +119,12 @@ type Discovery struct {
 }
 
 // NewDiscovery returns a new file discovery for the given paths.
-func NewDiscovery(conf *config.FileSDConfig, logger log.Logger, index int) *Discovery {
+func NewDiscovery(conf *config.FileSDConfig, logger log.Logger) *Discovery {
 	if logger == nil {
 		logger = log.NewNopLogger()
 	}
 
 	disc := &Discovery{
-		index:      index,
 		paths:      conf.Files,
 		interval:   time.Duration(conf.RefreshInterval),
 		timestamps: make(map[string]float64),
