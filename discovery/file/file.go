@@ -330,14 +330,11 @@ func (d *Discovery) readFile(filename string) ([]*config.TargetGroup, error) {
 		return nil, err
 	}
 
-	// We use a mutex when setting timestamp, so don't block the rest of readFile.
-	go func() {
-		info, err := fd.Stat()
-		if err != nil {
-			return
-		}
-		d.writeTimestamp(filename, float64(info.ModTime().Unix()))
-	}()
+	info, err := fd.Stat()
+	if err != nil {
+		return nil, err
+	}
+	d.writeTimestamp(filename, float64(info.ModTime().Unix()))
 
 	var targetGroups []*config.TargetGroup
 
