@@ -88,7 +88,7 @@ func NewTimestampCollector() *TimestampCollector {
 	return &TimestampCollector{
 		Description: prometheus.NewDesc(
 			"prometheus_sd_file_timestamp",
-			"Timestamp of files read by FileSD. Timestamp is set at read time.",
+			"Timestamp (mtime) of files read by FileSD. Timestamp is set at read time.",
 			[]string{"filename"},
 			nil,
 		),
