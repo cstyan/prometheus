@@ -41,6 +41,7 @@ const fileSDFilepathLabel = model.MetaLabelPrefix + "filepath"
 type TimestampCollector struct {
 	Description *prometheus.Desc
 	discoverers map[*Discovery]struct{}
+	lock        sync.RWMutex
 }
 
 // Describe method sends the description to the channel.
@@ -52,17 +53,19 @@ func (t *TimestampCollector) Describe(ch chan<- *prometheus.Desc) {
 func (t *TimestampCollector) Collect(ch chan<- prometheus.Metric) {
 	// new map to dedup dilenames
 	uniqueFiles := make(map[string]float64)
-
-	for fileSD := range t.discoverers {
-		for filename := range fileSD.timestamps {
-			uniqueFiles[filename] = fileSD.timestamps[filename]
+	t.lock.RLock()
+	discoverers := t.discoverers
+	t.lock.RUnlock()
+	for fileSD := range discoverers {
+		for filename, timestamp := range fileSD.timestamps {
+			uniqueFiles[filename] = timestamp
 		}
 	}
-	for filename := range uniqueFiles {
+	for filename, timestamp := range uniqueFiles {
 		ch <- prometheus.MustNewConstMetric(
 			t.Description,
 			prometheus.GaugeValue,
-			uniqueFiles[filename],
+			timestamp,
 			filename,
 		)
 	}
