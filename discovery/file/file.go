@@ -71,6 +71,18 @@ func (t *TimestampCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 }
 
+func (t *TimestampCollector) addDiscoverer(disc *Discovery) {
+	t.lock.Lock()
+	t.discoverers[disc] = struct{}{}
+	t.lock.Unlock()
+}
+
+func (t *TimestampCollector) removeDiscoverer(disc *Discovery) {
+	t.lock.Lock()
+	delete(t.discoverers, disc)
+	t.lock.Unlock()
+}
+
 // NewTimestampCollector creates a TimestampCollector.
 func NewTimestampCollector() *TimestampCollector {
 	return &TimestampCollector{
@@ -133,7 +145,7 @@ func NewDiscovery(conf *config.FileSDConfig, logger log.Logger) *Discovery {
 		timestamps: make(map[string]float64),
 		logger:     logger,
 	}
-	fileSDTimeStamp.discoverers[disc] = struct{}{}
+	fileSDTimeStamp.addDiscoverer(disc)
 	return disc
 }
 
@@ -237,6 +249,8 @@ func (d *Discovery) stop() {
 
 	done := make(chan struct{})
 	defer close(done)
+
+	fileSDTimeStamp.removeDiscoverer(d)
 
 	// Closing the watcher will deadlock unless all events and errors are drained.
 	go func() {
