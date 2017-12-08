@@ -320,14 +320,19 @@ func (d *Discovery) refresh(ctx context.Context, ch chan<- []*config.TargetGroup
 // readFile reads a JSON or YAML list of targets groups from the file, depending on its
 // file extension. It returns full configuration target groups.
 func (d *Discovery) readFile(filename string) ([]*config.TargetGroup, error) {
-	content, err := ioutil.ReadFile(filename)
+	fd, err := os.Open(filename)
+	if err != nil {
+		return nil, err
+	}
+
+	content, err := ioutil.ReadAll(fd)
 	if err != nil {
 		return nil, err
 	}
 
 	// We use a mutex when setting timestamp, so don't block the rest of readFile.
 	go func() {
-		info, err := os.Stat(filename)
+		info, err := fd.Stat()
 		if err != nil {
 			return
 		}
