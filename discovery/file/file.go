@@ -301,7 +301,7 @@ func (d *Discovery) refresh(ctx context.Context, ch chan<- []*config.TargetGroup
 	for f, n := range d.lastRefresh {
 		m, ok := ref[f]
 		if !ok || n > m {
-			level.Error(d.logger).Log("msg", "file_sd refresh found file that should be removed", "file", f)
+			level.Debug(d.logger).Log("msg", "file_sd refresh found file that should be removed", "file", f)
 			d.deleteTimestamp(f)
 			for i := m; i < n; i++ {
 				select {
