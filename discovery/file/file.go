@@ -54,13 +54,12 @@ func (t *TimestampCollector) Collect(ch chan<- prometheus.Metric) {
 	// New map to dedup filenames.
 	uniqueFiles := make(map[string]float64)
 	t.lock.RLock()
-	discoverers := t.discoverers
-	t.lock.RUnlock()
-	for fileSD := range discoverers {
+	for fileSD := range t.discoverers {
 		for filename, timestamp := range fileSD.timestamps {
 			uniqueFiles[filename] = timestamp
 		}
 	}
+	t.lock.RUnlock()
 	for filename, timestamp := range uniqueFiles {
 		ch <- prometheus.MustNewConstMetric(
 			t.Description,
