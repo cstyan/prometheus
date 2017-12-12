@@ -51,7 +51,7 @@ func (t *TimestampCollector) Describe(ch chan<- *prometheus.Desc) {
 
 // Collect creates constant metrics for each file with last modified time of the file.
 func (t *TimestampCollector) Collect(ch chan<- prometheus.Metric) {
-	// new map to dedup dilenames
+	// New map to dedup filenames.
 	uniqueFiles := make(map[string]float64)
 	t.lock.RLock()
 	discoverers := t.discoverers
