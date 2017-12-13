@@ -323,6 +323,7 @@ func (d *Discovery) readFile(filename string) ([]*config.TargetGroup, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer fd.Close()
 
 	content, err := ioutil.ReadAll(fd)
 	if err != nil {
