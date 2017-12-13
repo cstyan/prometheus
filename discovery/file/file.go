@@ -334,7 +334,6 @@ func (d *Discovery) readFile(filename string) ([]*config.TargetGroup, error) {
 	if err != nil {
 		return nil, err
 	}
-	d.writeTimestamp(filename, float64(info.ModTime().Unix()))
 
 	var targetGroups []*config.TargetGroup
 
@@ -363,6 +362,9 @@ func (d *Discovery) readFile(filename string) ([]*config.TargetGroup, error) {
 		}
 		tg.Labels[fileSDFilepathLabel] = model.LabelValue(filename)
 	}
+
+	d.writeTimestamp(filename, float64(info.ModTime().Unix()))
+
 	return targetGroups, nil
 }
 
