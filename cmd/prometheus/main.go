@@ -566,6 +566,11 @@ func main() {
 					prometheus.DefaultRegisterer,
 					&cfg.tsdb,
 				)
+
+				pwd, _ := os.Getwd()
+				walDir := fmt.Sprintf("%s/%swal/", pwd, db.Dir())
+				remoteStorage.SetWALDir(walDir)
+				remoteStorage.StartWALWatcher()
 				if err != nil {
 					return fmt.Errorf("opening storage failed: %s", err)
 				}
