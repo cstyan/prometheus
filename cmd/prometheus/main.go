@@ -34,22 +34,19 @@ import (
 
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
+	"github.com/mwitkow/go-conntrack"
 	"github.com/oklog/oklog/pkg/group"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/model"
-	"github.com/prometheus/common/version"
-	prom_runtime "github.com/prometheus/prometheus/pkg/runtime"
-	"gopkg.in/alecthomas/kingpin.v2"
-	k8s_runtime "k8s.io/apimachinery/pkg/util/runtime"
-
-	"github.com/mwitkow/go-conntrack"
 	"github.com/prometheus/common/promlog"
 	promlogflag "github.com/prometheus/common/promlog/flag"
+	"github.com/prometheus/common/version"
 	"github.com/prometheus/prometheus/config"
 	"github.com/prometheus/prometheus/discovery"
 	sd_config "github.com/prometheus/prometheus/discovery/config"
 	"github.com/prometheus/prometheus/notifier"
+	prom_runtime "github.com/prometheus/prometheus/pkg/runtime"
 	"github.com/prometheus/prometheus/promql"
 	"github.com/prometheus/prometheus/rules"
 	"github.com/prometheus/prometheus/scrape"
@@ -58,6 +55,8 @@ import (
 	"github.com/prometheus/prometheus/storage/tsdb"
 	"github.com/prometheus/prometheus/util/strutil"
 	"github.com/prometheus/prometheus/web"
+	"gopkg.in/alecthomas/kingpin.v2"
+	k8s_runtime "k8s.io/apimachinery/pkg/util/runtime"
 )
 
 var (
@@ -249,7 +248,7 @@ func main() {
 
 	var (
 		localStorage  = &tsdb.ReadyStorage{}
-		remoteStorage = remote.NewStorage(log.With(logger, "component", "remote"), localStorage.StartTime, time.Duration(cfg.RemoteFlushDeadline))
+		remoteStorage = remote.NewStorage(log.With(logger, "component", "remote"), prometheus.DefaultRegisterer, localStorage.StartTime, cfg.localStoragePath, localStorage.Get(), time.Duration(cfg.RemoteFlushDeadline))
 		fanoutStorage = storage.NewFanout(logger, localStorage, remoteStorage)
 	)
 
@@ -322,7 +321,6 @@ func main() {
 
 	// Depends on cfg.web.ScrapeManager so needs to be after cfg.web.ScrapeManager = scrapeManager
 	webHandler := web.New(log.With(logger, "component", "web"), &cfg.web)
-
 	// Monitor outgoing connections on default transport with conntrack.
 	http.DefaultTransport.(*http.Transport).DialContext = conntrack.NewDialContextFunc(
 		conntrack.DialWithTracing(),
@@ -526,7 +524,6 @@ func main() {
 				}
 
 				reloadReady.Close()
-
 				webHandler.Ready()
 				level.Info(logger).Log("msg", "Server is ready to receive web requests.")
 				<-cancel
@@ -566,11 +563,6 @@ func main() {
 					prometheus.DefaultRegisterer,
 					&cfg.tsdb,
 				)
-
-				pwd, _ := os.Getwd()
-				walDir := fmt.Sprintf("%s/%swal/", pwd, db.Dir())
-				remoteStorage.SetWALDir(walDir)
-				remoteStorage.StartWALWatcher()
 				if err != nil {
 					return fmt.Errorf("opening storage failed: %s", err)
 				}
@@ -578,6 +570,7 @@ func main() {
 
 				startTimeMargin := int64(2 * time.Duration(cfg.tsdb.MinBlockDuration).Seconds() * 1000)
 				localStorage.Set(db, startTimeMargin)
+				remoteStorage.SetDB(db)
 				close(dbOpen)
 				<-cancel
 				return nil

@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -33,6 +34,7 @@ import (
 
 	"github.com/gogo/protobuf/proto"
 	"github.com/golang/snappy"
+	"github.com/prometheus/client_golang/prometheus"
 	config_util "github.com/prometheus/common/config"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/common/promlog"
@@ -49,6 +51,7 @@ import (
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/storage/remote"
 	"github.com/prometheus/prometheus/util/testutil"
+	"github.com/prometheus/tsdb"
 )
 
 type testTargetRetriever struct{}
@@ -258,9 +261,17 @@ func TestEndpoints(t *testing.T) {
 
 		al := promlog.AllowedLevel{}
 		al.Set("debug")
-		remote := remote.NewStorage(promlog.New(al), func() (int64, error) {
+		logger := promlog.New(al)
+
+		dbDir, err := ioutil.TempDir("", "tsdb-api-ready")
+		testutil.Ok(t, err)
+		defer os.RemoveAll(dbDir)
+
+		db, err := tsdb.Open(dbDir, logger, nil, nil)
+		testutil.Ok(t, err)
+		remote := remote.NewStorage(logger, prometheus.DefaultRegisterer, func() (int64, error) {
 			return 0, nil
-		}, 1*time.Second)
+		}, db, 1*time.Second)
 
 		err = remote.ApplyConfig(&config.Config{
 			RemoteReadConfigs: []*config.RemoteReadConfig{

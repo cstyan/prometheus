@@ -20,15 +20,17 @@ import (
 	"sync/atomic"
 	"time"
 
-	"golang.org/x/time/rate"
-
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
+	"github.com/gogo/protobuf/proto"
+	"github.com/golang/snappy"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/config"
 	"github.com/prometheus/prometheus/prompb"
 	"github.com/prometheus/prometheus/relabel"
+	"github.com/prometheus/tsdb"
+	"golang.org/x/time/rate"
 )
 
 // String constants for instrumentation.
@@ -97,6 +99,15 @@ var (
 		},
 		[]string{queue},
 	)
+	queueSentTimestamp = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: namespace,
+			Subsystem: subsystem,
+			Name:      "queue_last_sent_timestamp",
+			Help:      "Timestamp of the last successful send by this queue.",
+		},
+		[]string{queue},
+	)
 	shardCapacity = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: namespace,
@@ -123,6 +134,7 @@ func init() {
 	prometheus.MustRegister(droppedSamplesTotal)
 	prometheus.MustRegister(sentBatchDuration)
 	prometheus.MustRegister(queueLength)
+	prometheus.MustRegister(queueSentTimestamp)
 	prometheus.MustRegister(shardCapacity)
 	prometheus.MustRegister(numShards)
 }
@@ -131,13 +143,14 @@ func init() {
 // external timeseries database.
 type StorageClient interface {
 	// Store stores the given samples in the remote storage.
-	Store(context.Context, *prompb.WriteRequest) error
+	Store(context.Context, []byte) error
 	// Name identifies the remote storage implementation.
 	Name() string
 }
 
 // QueueManager manages a queue of samples to be sent to the Storage
-// indicated by the provided StorageClient.
+// indicated by the provided StorageClient. Implements Writer interface
+// used by WAL Watcher.
 type QueueManager struct {
 	logger log.Logger
 
@@ -148,6 +161,12 @@ type QueueManager struct {
 	client         StorageClient
 	queueName      string
 	logLimiter     *rate.Limiter
+	watcher        *WALWatcher
+	sentTimestamp  prometheus.Gauge
+
+	seriesMtx sync.Mutex
+	series    map[uint64][]*prompb.Label
+	db        *tsdb.DB
 
 	shardsMtx   sync.Mutex
 	shards      *shards
@@ -161,7 +180,7 @@ type QueueManager struct {
 }
 
 // NewQueueManager builds a new QueueManager.
-func NewQueueManager(logger log.Logger, cfg config.QueueConfig, externalLabels model.LabelSet, relabelConfigs []*config.RelabelConfig, client StorageClient, flushDeadline time.Duration) *QueueManager {
+func NewQueueManager(logger log.Logger, walDir string, samplesIn *ewmaRate, cfg config.QueueConfig, externalLabels model.LabelSet, relabelConfigs []*config.RelabelConfig, client StorageClient, flushDeadline time.Duration) *QueueManager {
 	if logger == nil {
 		logger = log.NewNopLogger()
 	} else {
@@ -176,16 +195,22 @@ func NewQueueManager(logger log.Logger, cfg config.QueueConfig, externalLabels m
 		client:         client,
 		queueName:      client.Name(),
 
+		series: make(map[uint64][]*prompb.Label),
+
 		logLimiter:  rate.NewLimiter(logRateLimit, logBurst),
 		numShards:   1,
 		reshardChan: make(chan int),
 		quit:        make(chan struct{}),
 
-		samplesIn:          newEWMARate(ewmaWeight, shardUpdateDuration),
+		samplesIn:          samplesIn,
 		samplesOut:         newEWMARate(ewmaWeight, shardUpdateDuration),
 		samplesOutDuration: newEWMARate(ewmaWeight, shardUpdateDuration),
 	}
+
+	t.sentTimestamp = queueSentTimestamp.WithLabelValues(t.queueName)
+	t.watcher = NewWALWatcher(logger, t, walDir)
 	t.shards = t.newShards(t.numShards)
+
 	numShards.WithLabelValues(t.queueName).Set(float64(t.numShards))
 	shardCapacity.WithLabelValues(t.queueName).Set(float64(t.cfg.Capacity))
 
@@ -201,36 +226,29 @@ func NewQueueManager(logger log.Logger, cfg config.QueueConfig, externalLabels m
 // Append queues a sample to be sent to the remote storage. It drops the
 // sample on the floor if the queue is full.
 // Always returns nil.
-func (t *QueueManager) Append(s *model.Sample) error {
-	snew := *s
-	snew.Metric = s.Metric.Clone()
+func (t *QueueManager) Append(s []tsdb.RefSample) bool {
+	tempSamples := make([]tsdb.RefSample, 0, len(s))
 
-	for ln, lv := range t.externalLabels {
-		if _, ok := s.Metric[ln]; !ok {
-			snew.Metric[ln] = lv
+	t.seriesMtx.Lock()
+	for _, sample := range s {
+		// If we have no labels for the series, due to relabelling or otherwise, don't send the sample.
+		if _, ok := t.series[sample.Ref]; !ok {
+			droppedSamplesTotal.WithLabelValues(t.queueName).Inc()
+			continue
 		}
+		tempSamples = append(tempSamples, sample)
 	}
-
-	snew.Metric = model.Metric(
-		relabel.Process(model.LabelSet(snew.Metric), t.relabelConfigs...))
-
-	if snew.Metric == nil {
-		return nil
-	}
+	t.seriesMtx.Unlock()
 
 	t.shardsMtx.Lock()
-	enqueued := t.shards.enqueue(&snew)
-	t.shardsMtx.Unlock()
-
-	if enqueued {
-		queueLength.WithLabelValues(t.queueName).Inc()
-	} else {
-		droppedSamplesTotal.WithLabelValues(t.queueName).Inc()
-		if t.logLimiter.Allow() {
-			level.Warn(t.logger).Log("msg", "Remote storage queue full, discarding sample. Multiple subsequent messages of this kind may be suppressed.")
+	defer t.shardsMtx.Unlock()
+	for _, sample := range tempSamples[:len(tempSamples)] {
+		if err := t.shards.enqueue(sample); err != nil {
+			level.Error(t.logger).Log("err", err)
+			return false
 		}
 	}
-	return nil
+	return true
 }
 
 // NeedsThrottling implements storage.SampleAppender. It will always return
@@ -246,6 +264,7 @@ func (t *QueueManager) Start() {
 	t.wg.Add(2)
 	go t.updateShardsLoop()
 	go t.reshardLoop()
+	t.watcher.Start()
 
 	t.shardsMtx.Lock()
 	defer t.shardsMtx.Unlock()
@@ -257,6 +276,7 @@ func (t *QueueManager) Start() {
 func (t *QueueManager) Stop() {
 	level.Info(t.logger).Log("msg", "Stopping remote storage...")
 	close(t.quit)
+	t.watcher.Stop()
 	t.wg.Wait()
 
 	t.shardsMtx.Lock()
@@ -264,6 +284,45 @@ func (t *QueueManager) Stop() {
 	t.shards.stop(t.flushDeadline)
 
 	level.Info(t.logger).Log("msg", "Remote storage stopped.")
+}
+
+// Keep track of which series we know about for lookups when sending samples to remote.
+func (t *QueueManager) StoreSeries(series []tsdb.RefSeries) {
+	temp := make(map[uint64][]*prompb.Label)
+	for i := 0; i < len(series); i++ {
+		var ls = make(model.LabelSet)
+		for _, label := range series[i].Labels {
+			ls[model.LabelName(label.Name)] = model.LabelValue(label.Value)
+		}
+		t.processExternalLabels(ls)
+		relabel.Process(ls, t.relabelConfigs...)
+		temp[series[i].Ref] = labelsToLabelsProto(labelsetToLabels(ls))
+	}
+	t.seriesMtx.Lock()
+	defer t.seriesMtx.Unlock()
+	for ref, labels := range temp {
+		t.series[ref] = labels
+	}
+}
+
+func (t *QueueManager) processExternalLabels(ls model.LabelSet) {
+	for ln, lv := range t.externalLabels {
+		if _, ok := ls[ln]; !ok {
+			ls[ln] = lv
+		}
+	}
+}
+
+func (t *QueueManager) TrimSeries() {
+	t.seriesMtx.Lock()
+	defer t.seriesMtx.Unlock()
+
+	refs := t.db.AllSeriesIDs()
+	newSeries := make(map[uint64][]*prompb.Label)
+	for _, k := range refs[:] {
+		newSeries[k] = t.series[k]
+	}
+	t.series = newSeries
 }
 
 func (t *QueueManager) updateShardsLoop() {
@@ -376,7 +435,7 @@ func (t *QueueManager) reshard(n int) {
 
 type shards struct {
 	qm      *QueueManager
-	queues  []chan *model.Sample
+	queues  []chan tsdb.RefSample
 	done    chan struct{}
 	running int32
 	ctx     context.Context
@@ -384,9 +443,9 @@ type shards struct {
 }
 
 func (t *QueueManager) newShards(numShards int) *shards {
-	queues := make([]chan *model.Sample, numShards)
+	queues := make([]chan tsdb.RefSample, numShards)
 	for i := 0; i < numShards; i++ {
-		queues[i] = make(chan *model.Sample, t.cfg.Capacity)
+		queues[i] = make(chan tsdb.RefSample, 10)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &shards{
@@ -398,6 +457,35 @@ func (t *QueueManager) newShards(numShards int) *shards {
 		cancel:  cancel,
 	}
 	return s
+}
+
+func (t *QueueManager) buildWriteRequest(samples []tsdb.RefSample, series map[uint64][]*prompb.Label) ([]byte, error) {
+	t.seriesMtx.Lock()
+	defer t.seriesMtx.Unlock()
+	req := &prompb.WriteRequest{
+		Timeseries: make([]*prompb.TimeSeries, 0, len(samples)),
+	}
+	for _, s := range samples {
+		ts := prompb.TimeSeries{
+			Labels: series[s.Ref],
+			Samples: []prompb.Sample{
+				prompb.Sample{
+					Value:     float64(s.V),
+					Timestamp: int64(s.T),
+				},
+			},
+		}
+		req.Timeseries = append(req.Timeseries, &ts)
+	}
+
+	data, err := proto.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+
+	compressed := snappy.Encode(nil, data)
+
+	return compressed, nil
 }
 
 func (s *shards) len() int {
@@ -424,21 +512,23 @@ func (s *shards) stop(deadline time.Duration) {
 
 	// Force an unclean shutdown.
 	s.cancel()
-	<-s.done
+	// Why does this send block now...?
+	// <-s.done
 	return
 }
 
-func (s *shards) enqueue(sample *model.Sample) bool {
-	s.qm.samplesIn.incr(1)
+func (s *shards) enqueue(sample tsdb.RefSample) error {
 
-	fp := sample.Metric.FastFingerprint()
-	shard := uint64(fp) % uint64(len(s.queues))
+	shard := uint64(sample.Ref) % uint64(len(s.queues))
+	for {
+		select {
+		case <-s.ctx.Done():
+			return s.ctx.Err()
+		case s.queues[shard] <- sample:
+			s.qm.samplesIn.incr(1)
+			return nil
+		}
 
-	select {
-	case s.queues[shard] <- sample:
-		return true
-	default:
-		return false
 	}
 }
 
@@ -454,7 +544,7 @@ func (s *shards) runShard(i int) {
 	// Send batches of at most MaxSamplesPerSend samples to the remote storage.
 	// If we have fewer samples than that, flush them out after a deadline
 	// anyways.
-	pendingSamples := model.Samples{}
+	pendingSamples := []tsdb.RefSample{}
 
 	timer := time.NewTimer(time.Duration(s.qm.cfg.BatchSendDeadline))
 	stop := func() {
@@ -471,7 +561,6 @@ func (s *shards) runShard(i int) {
 		select {
 		case <-s.ctx.Done():
 			return
-
 		case sample, ok := <-queue:
 			if !ok {
 				if len(pendingSamples) > 0 {
@@ -485,14 +574,13 @@ func (s *shards) runShard(i int) {
 			queueLength.WithLabelValues(s.qm.queueName).Dec()
 			pendingSamples = append(pendingSamples, sample)
 
-			if len(pendingSamples) >= s.qm.cfg.MaxSamplesPerSend {
-				s.sendSamples(pendingSamples[:s.qm.cfg.MaxSamplesPerSend])
-				pendingSamples = pendingSamples[s.qm.cfg.MaxSamplesPerSend:]
+			if len(pendingSamples) >= 100 {
+				s.sendSamples(pendingSamples[:100])
+				pendingSamples = pendingSamples[100:]
 
 				stop()
 				timer.Reset(time.Duration(s.qm.cfg.BatchSendDeadline))
 			}
-
 		case <-timer.C:
 			if len(pendingSamples) > 0 {
 				s.sendSamples(pendingSamples)
@@ -503,9 +591,13 @@ func (s *shards) runShard(i int) {
 	}
 }
 
-func (s *shards) sendSamples(samples model.Samples) {
+func (s *shards) sendSamples(samples []tsdb.RefSample) {
 	begin := time.Now()
-	s.sendSamplesWithBackoff(samples)
+	err := s.sendSamplesWithBackoff(samples)
+	if err != nil {
+		level.Error(s.qm.logger).Log("msg", "non-recoverable error", "count", len(samples), "err", err)
+		return
+	}
 
 	// These counters are used to calculate the dynamic sharding, and as such
 	// should be maintained irrespective of success or failure.
@@ -514,30 +606,42 @@ func (s *shards) sendSamples(samples model.Samples) {
 }
 
 // sendSamples to the remote storage with backoff for recoverable errors.
-func (s *shards) sendSamplesWithBackoff(samples model.Samples) {
+func (s *shards) sendSamplesWithBackoff(samples []tsdb.RefSample) error {
 	backoff := s.qm.cfg.MinBackoff
-	req := ToWriteRequest(samples)
+	req, err := s.qm.buildWriteRequest(samples, s.qm.series)
+	// Failing to build the write request is non-recoverable, since it will
+	// only error if marshaling the proto to bytes fails.
+	if err != nil {
+		return err
+	}
+	for {
+		select {
+		case <-s.ctx.Done():
+			return s.ctx.Err()
+		default:
+			begin := time.Now()
+			err := s.qm.client.Store(s.ctx, req)
 
-	for retries := s.qm.cfg.MaxRetries; retries > 0; retries-- {
-		begin := time.Now()
-		err := s.qm.client.Store(s.ctx, req)
+			sentBatchDuration.WithLabelValues(s.qm.queueName).Observe(time.Since(begin).Seconds())
+			if err == nil {
+				succeededSamplesTotal.WithLabelValues(s.qm.queueName).Add(float64(len(samples)))
+				s.qm.sentTimestamp.SetToCurrentTime()
+				return nil
+			}
 
-		sentBatchDuration.WithLabelValues(s.qm.queueName).Observe(time.Since(begin).Seconds())
-		if err == nil {
-			succeededSamplesTotal.WithLabelValues(s.qm.queueName).Add(float64(len(samples)))
-			return
-		}
+			if _, ok := err.(recoverableError); !ok {
+				return err
+			}
 
-		level.Warn(s.qm.logger).Log("msg", "Error sending samples to remote storage", "count", len(samples), "err", err)
-		if _, ok := err.(recoverableError); !ok {
-			break
-		}
-		time.Sleep(time.Duration(backoff))
-		backoff = backoff * 2
-		if backoff > s.qm.cfg.MaxBackoff {
-			backoff = s.qm.cfg.MaxBackoff
+			if s.qm.logLimiter.Allow() {
+				level.Error(s.qm.logger).Log("err", err)
+			}
+
+			time.Sleep(time.Duration(backoff))
+			backoff = backoff * 2
+			if backoff > s.qm.cfg.MaxBackoff {
+				backoff = s.qm.cfg.MaxBackoff
+			}
 		}
 	}
-
-	failedSamplesTotal.WithLabelValues(s.qm.queueName).Add(float64(len(samples)))
 }

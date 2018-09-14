@@ -17,6 +17,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -25,6 +26,8 @@ import (
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/config"
 	"github.com/prometheus/prometheus/prompb"
+	"github.com/prometheus/tsdb"
+	"github.com/prometheus/tsdb/labels"
 )
 
 const defaultFlushDeadline = 1 * time.Minute
@@ -43,7 +46,62 @@ func NewTestStorageClient() *TestStorageClient {
 	}
 }
 
-func (c *TestStorageClient) expectSamples(ss model.Samples) {
+// MetricToLabelProtos builds a []*prompb.Label from a model.Metric
+func MetricToLabelProtos(metric model.Metric) []*prompb.Label {
+	labels := make([]*prompb.Label, 0, len(metric))
+	for k, v := range metric {
+		labels = append(labels, &prompb.Label{
+			Name:  string(k),
+			Value: string(v),
+		})
+	}
+	sort.Slice(labels, func(i int, j int) bool {
+		return labels[i].Name < labels[j].Name
+	})
+	return labels
+}
+
+func createTimeseries(n int) ([]tsdb.RefSample, []tsdb.RefSeries) {
+	samples := make([]tsdb.RefSample, 0, n)
+	series := make([]tsdb.RefSeries, 0, n)
+	for i := 0; i < n; i++ {
+		name := fmt.Sprintf("test_metric_%d", i)
+		samples = append(samples, tsdb.RefSample{
+			Ref: uint64(i),
+			T:   int64(i),
+			V:   float64(i),
+		})
+		series = append(series, tsdb.RefSeries{
+			Ref:    uint64(i),
+			Labels: labels.Labels{labels.Label{Name: "__name__", Value: name}},
+		})
+	}
+	return samples, series
+}
+
+func getSeriesNameFromRef(r tsdb.RefSeries) string {
+	for _, l := range r.Labels {
+		if l.Name == "__name__" {
+			return l.Value
+		}
+	}
+	return ""
+}
+
+func refSeriesToLabelsProto(series []tsdb.RefSeries) map[uint64][]*prompb.Label {
+	result := make(map[uint64][]*prompb.Label)
+	for _, s := range series {
+		for _, l := range s.Labels {
+			result[s.Ref] = append(result[s.Ref], &prompb.Label{
+				Name:  l.Name,
+				Value: l.Value,
+			})
+		}
+	}
+	return result
+}
+
+func (c *TestStorageClient) expectSamples(ss []tsdb.RefSample, series []tsdb.RefSeries) {
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
 
@@ -51,10 +109,10 @@ func (c *TestStorageClient) expectSamples(ss model.Samples) {
 	c.receivedSamples = map[string][]prompb.Sample{}
 
 	for _, s := range ss {
-		ts := labelProtosToLabels(MetricToLabelProtos(s.Metric)).String()
-		c.expectedSamples[ts] = append(c.expectedSamples[ts], prompb.Sample{
-			Timestamp: int64(s.Timestamp),
-			Value:     float64(s.Value),
+		seriesName := getSeriesNameFromRef(series[s.Ref])
+		c.expectedSamples[seriesName] = append(c.expectedSamples[seriesName], prompb.Sample{
+			Timestamp: s.T,
+			Value:     s.V,
 		})
 	}
 	c.wg.Add(len(ss))
@@ -62,7 +120,6 @@ func (c *TestStorageClient) expectSamples(ss model.Samples) {
 
 func (c *TestStorageClient) waitForExpectedSamples(t *testing.T) {
 	c.wg.Wait()
-
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
 	for ts, expectedSamples := range c.expectedSamples {
@@ -77,10 +134,16 @@ func (c *TestStorageClient) Store(_ context.Context, req *prompb.WriteRequest) e
 	defer c.mtx.Unlock()
 	count := 0
 	for _, ts := range req.Timeseries {
-		labels := labelProtosToLabels(ts.Labels).String()
+		var seriesName string
+		labels := labelProtosToLabels(ts.Labels)
+		for _, label := range labels {
+			if label.Name == "__name__" {
+				seriesName = label.Value
+			}
+		}
 		for _, sample := range ts.Samples {
 			count++
-			c.receivedSamples[labels] = append(c.receivedSamples[labels], sample)
+			c.receivedSamples[seriesName] = append(c.receivedSamples[seriesName], sample)
 		}
 	}
 	c.wg.Add(-count)
@@ -94,25 +157,16 @@ func (c *TestStorageClient) Name() string {
 func TestSampleDelivery(t *testing.T) {
 	// Let's create an even number of send batches so we don't run into the
 	// batch timeout case.
-	n := config.DefaultQueueConfig.Capacity * 2
-
-	samples := make(model.Samples, 0, n)
-	for i := 0; i < n; i++ {
-		name := model.LabelValue(fmt.Sprintf("test_metric_%d", i))
-		samples = append(samples, &model.Sample{
-			Metric: model.Metric{
-				model.MetricNameLabel: name,
-			},
-			Value: model.SampleValue(i),
-		})
-	}
+	// n := config.DefaultQueueConfig.Capacity * 2
+	samples, series := createTimeseries(20)
 
 	c := NewTestStorageClient()
-	c.expectSamples(samples[:len(samples)/2])
+	c.expectSamples(samples[:len(samples)/2], series)
 
 	cfg := config.DefaultQueueConfig
 	cfg.MaxShards = 1
-	m := NewQueueManager(nil, cfg, nil, nil, c, defaultFlushDeadline)
+	m := NewQueueManager(nil, nil, cfg, nil, nil, c, defaultFlushDeadline)
+	m.series = refSeriesToLabelsProto(series)
 
 	// These should be received by the client.
 	for _, s := range samples[:len(samples)/2] {
@@ -130,36 +184,26 @@ func TestSampleDelivery(t *testing.T) {
 
 func TestSampleDeliveryTimeout(t *testing.T) {
 	// Let's send one less sample than batch size, and wait the timeout duration
-	n := config.DefaultQueueConfig.Capacity - 1
-
-	samples := make(model.Samples, 0, n)
-	for i := 0; i < n; i++ {
-		name := model.LabelValue(fmt.Sprintf("test_metric_%d", i))
-		samples = append(samples, &model.Sample{
-			Metric: model.Metric{
-				model.MetricNameLabel: name,
-			},
-			Value: model.SampleValue(i),
-		})
-	}
-
+	n := 9
+	samples, series := createTimeseries(n)
 	c := NewTestStorageClient()
 
 	cfg := config.DefaultQueueConfig
 	cfg.MaxShards = 1
 	cfg.BatchSendDeadline = model.Duration(100 * time.Millisecond)
-	m := NewQueueManager(nil, cfg, nil, nil, c, defaultFlushDeadline)
+	m := NewQueueManager(nil, nil, cfg, nil, nil, c, defaultFlushDeadline)
+	m.series = refSeriesToLabelsProto(series)
 	m.Start()
 	defer m.Stop()
 
 	// Send the samples twice, waiting for the samples in the meantime.
-	c.expectSamples(samples)
+	c.expectSamples(samples, series)
 	for _, s := range samples {
 		m.Append(s)
 	}
 	c.waitForExpectedSamples(t)
 
-	c.expectSamples(samples)
+	c.expectSamples(samples, series)
 	for _, s := range samples {
 		m.Append(s)
 	}
@@ -169,30 +213,25 @@ func TestSampleDeliveryTimeout(t *testing.T) {
 func TestSampleDeliveryOrder(t *testing.T) {
 	ts := 10
 	n := config.DefaultQueueConfig.MaxSamplesPerSend * ts
-
-	samples := make(model.Samples, 0, n)
-	for i := 0; i < n; i++ {
-		name := model.LabelValue(fmt.Sprintf("test_metric_%d", i%ts))
-		samples = append(samples, &model.Sample{
-			Metric: model.Metric{
-				model.MetricNameLabel: name,
-			},
-			Value:     model.SampleValue(i),
-			Timestamp: model.Time(i),
-		})
-	}
+	samples, series := createTimeseries(n)
 
 	c := NewTestStorageClient()
-	c.expectSamples(samples)
-	m := NewQueueManager(nil, config.DefaultQueueConfig, nil, nil, c, defaultFlushDeadline)
+	c.expectSamples(samples, series)
+	m := NewQueueManager(nil, nil, config.DefaultQueueConfig, nil, nil, c, defaultFlushDeadline)
+	m.series = refSeriesToLabelsProto(series)
 
 	// These should be received by the client.
-	for _, s := range samples {
-		m.Append(s)
-	}
+	go func() {
+		for _, s := range samples {
+			for {
+				if ok := m.Append(s); ok {
+					break
+				}
+			}
+		}
+	}()
 	m.Start()
 	defer m.Stop()
-
 	c.waitForExpectedSamples(t)
 }
 
@@ -243,81 +282,27 @@ func (t *QueueManager) queueLen() int {
 	return queueLength
 }
 
-func TestSpawnNotMoreThanMaxConcurrentSendsGoroutines(t *testing.T) {
-	// Our goal is to fully empty the queue:
-	// `MaxSamplesPerSend*Shards` samples should be consumed by the
-	// per-shard goroutines, and then another `MaxSamplesPerSend`
-	// should be left on the queue.
-	n := config.DefaultQueueConfig.MaxSamplesPerSend * 2
-
-	samples := make(model.Samples, 0, n)
-	for i := 0; i < n; i++ {
-		name := model.LabelValue(fmt.Sprintf("test_metric_%d", i))
-		samples = append(samples, &model.Sample{
-			Metric: model.Metric{
-				model.MetricNameLabel: name,
-			},
-			Value: model.SampleValue(i),
+func tsdbLabelsToLabelsProto(labels labels.Labels) []*prompb.Label {
+	result := make([]*prompb.Label, 0, len(labels))
+	for _, l := range labels {
+		result = append(result, &prompb.Label{
+			Name:  l.Name,
+			Value: l.Value,
 		})
 	}
-
-	c := NewTestBlockedStorageClient()
-	cfg := config.DefaultQueueConfig
-	cfg.MaxShards = 1
-	cfg.Capacity = n
-	m := NewQueueManager(nil, cfg, nil, nil, c, defaultFlushDeadline)
-
-	m.Start()
-
-	defer func() {
-		c.unlock()
-		m.Stop()
-	}()
-
-	for _, s := range samples {
-		m.Append(s)
-	}
-
-	// Wait until the runShard() loops drain the queue.  If things went right, it
-	// should then immediately block in sendSamples(), but, in case of error,
-	// it would spawn too many goroutines, and thus we'd see more calls to
-	// client.Store()
-	//
-	// The timed wait is maybe non-ideal, but, in order to verify that we're
-	// not spawning too many concurrent goroutines, we have to wait on the
-	// Run() loop to consume a specific number of elements from the
-	// queue... and it doesn't signal that in any obvious way, except by
-	// draining the queue.  We cap the waiting at 1 second -- that should give
-	// plenty of time, and keeps the failure fairly quick if we're not draining
-	// the queue properly.
-	for i := 0; i < 100 && m.queueLen() > 0; i++ {
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	if m.queueLen() != config.DefaultQueueConfig.MaxSamplesPerSend {
-		t.Fatalf("Failed to drain QueueManager queue, %d elements left",
-			m.queueLen(),
-		)
-	}
-
-	numCalls := c.NumCalls()
-	if numCalls != uint64(1) {
-		t.Errorf("Saw %d concurrent sends, expected 1", numCalls)
-	}
+	return result
 }
 
 func TestShutdown(t *testing.T) {
 	deadline := 10 * time.Second
 	c := NewTestBlockedStorageClient()
-	m := NewQueueManager(nil, config.DefaultQueueConfig, nil, nil, c, deadline)
-	for i := 0; i < config.DefaultQueueConfig.MaxSamplesPerSend; i++ {
-		m.Append(&model.Sample{
-			Metric: model.Metric{
-				model.MetricNameLabel: model.LabelValue(fmt.Sprintf("test_metric_%d", i)),
-			},
-			Value:     model.SampleValue(i),
-			Timestamp: model.Time(i),
-		})
+	m := NewQueueManager(nil, nil, config.DefaultQueueConfig, nil, nil, c, deadline)
+	samples, series := createTimeseries(config.DefaultQueueConfig.MaxSamplesPerSend)
+	for _, s := range series {
+		m.series[s.Ref] = tsdbLabelsToLabelsProto(s.Labels)
+	}
+	for _, s := range samples {
+		m.Append(s)
 	}
 	m.Start()
 

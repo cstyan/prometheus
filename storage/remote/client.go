@@ -25,11 +25,10 @@ import (
 
 	"github.com/gogo/protobuf/proto"
 	"github.com/golang/snappy"
-	"github.com/prometheus/common/model"
-	"golang.org/x/net/context/ctxhttp"
-
 	config_util "github.com/prometheus/common/config"
+	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/prompb"
+	"golang.org/x/net/context/ctxhttp"
 )
 
 const maxErrMsgLen = 256
@@ -69,14 +68,8 @@ type recoverableError struct {
 }
 
 // Store sends a batch of samples to the HTTP endpoint.
-func (c *Client) Store(ctx context.Context, req *prompb.WriteRequest) error {
-	data, err := proto.Marshal(req)
-	if err != nil {
-		return err
-	}
-
-	compressed := snappy.Encode(nil, data)
-	httpReq, err := http.NewRequest("POST", c.url.String(), bytes.NewReader(compressed))
+func (c *Client) Store(ctx context.Context, req []byte) error {
+	httpReq, err := http.NewRequest("POST", c.url.String(), bytes.NewReader(req))
 	if err != nil {
 		// Errors from NewRequest are from unparseable URLs, so are not
 		// recoverable.

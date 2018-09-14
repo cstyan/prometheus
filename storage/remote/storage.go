@@ -15,19 +15,16 @@ package remote
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"time"
 
 	"github.com/go-kit/kit/log"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/config"
 	"github.com/prometheus/prometheus/pkg/labels"
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/tsdb"
-	tsdbLabels "github.com/prometheus/tsdb/labels"
-	"github.com/prometheus/tsdb/wal"
-	fsnotify "gopkg.in/fsnotify/fsnotify.v1"
 )
 
 // Callback func that return the oldest timestamp stored in a storage.
@@ -40,12 +37,13 @@ type Storage struct {
 	mtx    sync.RWMutex
 
 	// For writes
-	walDir  string
-	watcher *fsnotify.Watcher
-	wal     *wal.WAL
-	series  map[uint64]tsdbLabels.Labels
-	clients []*Client
-	// queues []*QueueManager
+	walDir          string
+	queuesMtx       sync.Mutex
+	queues          map[*QueueManager]struct{}
+	failedQueues    map[*QueueManager]struct{}
+	db              *tsdb.DB
+	samplesIn       *ewmaRate
+	samplesInMetric prometheus.Counter
 
 	// For reads
 	queryables             []storage.Queryable
@@ -54,15 +52,27 @@ type Storage struct {
 }
 
 // NewStorage returns a remote.Storage.
-func NewStorage(l log.Logger, stCallback startTimeCallback, flushDeadline time.Duration) *Storage {
+func NewStorage(l log.Logger, reg prometheus.Registerer, stCallback startTimeCallback, walDir string, db *tsdb.DB, flushDeadline time.Duration) *Storage {
 	if l == nil {
 		l = log.NewNopLogger()
 	}
-	return &Storage{
+	shardUpdateDuration := 10 * time.Second
+	s := &Storage{
 		logger:                 l,
 		localStartTimeCallback: stCallback,
 		flushDeadline:          flushDeadline,
+		walDir:                 walDir,
+		db:                     db,
+		queues:                 make(map[*QueueManager]struct{}),
+		failedQueues:           make(map[*QueueManager]struct{}),
+		samplesIn:              newEWMARate(ewmaWeight, shardUpdateDuration),
+		samplesInMetric: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "prometheus_remote_storage_samples_in_total",
+			Help: "Samples in to remote storage, compare to samples out for queue managers.",
+		}),
 	}
+	reg.MustRegister(s.samplesInMetric)
+	return s
 }
 
 // ApplyConfig updates the state as the new config requires.
@@ -70,6 +80,10 @@ func (s *Storage) ApplyConfig(conf *config.Config) error {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 
+	var a struct{}
+
+	// Update write queues
+	newQueues := make(map[*QueueManager]struct{})
 	// TODO: we should only stop & recreate queues which have changes,
 	// as this can be quite disruptive.
 	for i, rwConf := range conf.RemoteWriteConfigs {
@@ -81,7 +95,28 @@ func (s *Storage) ApplyConfig(conf *config.Config) error {
 		if err != nil {
 			return err
 		}
-		s.clients = append(s.clients, c)
+		q := NewQueueManager(
+			s.logger,
+			s.walDir,
+			s.samplesIn,
+			rwConf.QueueConfig,
+			conf.GlobalConfig.ExternalLabels,
+			rwConf.WriteRelabelConfigs,
+			c,
+			s.flushDeadline)
+		if s.db != nil {
+			q.db = s.db
+		}
+		newQueues[q] = a
+	}
+
+	for q := range s.queues {
+		q.Stop()
+	}
+
+	s.queues = newQueues
+	for q := range s.queues {
+		q.Start()
 	}
 
 	// Update read clients
@@ -111,181 +146,8 @@ func (s *Storage) ApplyConfig(conf *config.Config) error {
 	return nil
 }
 
-func (s *Storage) SetWALDir(dir string) {
-	s.logger.Log("msg", fmt.Sprintf("setting wal dir to %s", dir))
-	s.walDir = dir
-}
-
-// keep track of which series we know about for lookups when sending samples to remote
-func (s *Storage) storeSeries(series []tsdb.RefSeries) {
-	for i := 0; i < len(series); i++ {
-		_, ok := s.series[series[i].Ref]
-		if !ok {
-			s.series[series[i].Ref] = series[i].Labels
-		}
-	}
-}
-
-func (s *Storage) storeSamples(samples []tsdb.RefSample) {
-	var sa []*model.Sample
-	s.logger.Log("msg", "in store samples")
-	for _, sample := range samples {
-		s.logger.Log("sample", fmt.Sprintf("%+v", sample))
-		_, ok := s.series[sample.Ref]
-		if !ok {
-			s.logger.Log("msg", "unknown series", "ref", sample.Ref)
-			continue
-		}
-		s.logger.Log("msg", "send samples for series here", "ref", sample.Ref)
-		// convert RefSample to model.Sample
-		metric := make(model.Metric, len(s.series[sample.Ref]))
-		for _, v := range s.series[sample.Ref] {
-			metric[model.LabelName(v.Name)] = model.LabelValue(v.Value)
-		}
-		c := &model.Sample{
-			Metric:    metric,
-			Value:     model.SampleValue(sample.V),
-			Timestamp: model.Time(sample.T),
-		}
-		sa = append(sa, c)
-	}
-	req := ToWriteRequest(sa)
-	s.logger.Log("write request:", fmt.Sprintf("%+v", req))
-	for _, c := range s.clients {
-		s.logger.Log("msg", "should be sending here **********************************", "url", c.url.String())
-		ctx := context.Background()
-		// we just need to pass any ctx for now
-		c.Store(ctx, req)
-	}
-}
-
-func (s *Storage) decodeSegment(segment *wal.Segment) bool {
-	// todo: callum, is there an easy way to detect if r.Next() has returned the last possible record in a segment.
-	// For now just recover from the panic that is thrown if we call r.Next() when we shouldn't have
-	defer func() {
-		if r := recover(); r != nil {
-			s.logger.Log("err", r)
-			// level.Error(log.With(logger)).Log("err", r)
-			segment.Close()
-		}
-	}()
-	r := wal.NewReader(segment)
-	var (
-		dec      tsdb.RecordDecoder
-		series   []tsdb.RefSeries
-		samples  []tsdb.RefSample
-		nSeries  = 0
-		nSamples = 0
-	)
-	for {
-		ok := r.Next()
-		rec := r.Record()
-		switch dec.Type(rec) {
-		case tsdb.RecordSeries:
-			s.logger.Log("msg", "new series!!!!")
-			series, err := dec.Series(rec, series[:0])
-			if err != nil {
-				s.logger.Log("err", err)
-				// level.Error(log.With(logger)).Log("err", err)
-				return ok
-			}
-			s.storeSeries(series)
-			nSeries += len(series)
-		case tsdb.RecordSamples:
-			s.logger.Log("msg", "samples!!!!")
-			samples, err := dec.Samples(rec, samples[:0])
-			if err != nil {
-				s.logger.Log("err", err)
-				// level.Error(log.With(logger)).Log("err", err)
-				return ok
-			}
-			s.storeSamples(samples)
-			nSamples += len(samples)
-		}
-		if !ok {
-			return ok
-		}
-	}
-}
-
-// StartWALWatcher is used to start a go routine that watches the WAL directory for updates
-// to segment files and new segment files, decoding samples that it reads.
-func (s *Storage) StartWALWatcher() {
-	if s.series == nil {
-		s.series = make(map[uint64]tsdbLabels.Labels)
-	}
-	var err error
-	s.wal, err = wal.New(nil, nil, s.walDir)
-	if err != nil {
-		s.logger.Log("err", err)
-
-		// level.Error(log.With(logger)).Log("err", err)
-	}
-	_, n, err := s.wal.Segments()
-
-	if err != nil {
-		s.logger.Log("err", err)
-
-		// level.Error(log.With(logger)).Log("err", err)
-	}
-	if n == -1 {
-		s.logger.Log("err", "no segments found")
-
-		// level.Error(log.With(logger)).Log("err", "no segments found")
-		return
-	}
-	s.watcher, err = fsnotify.NewWatcher()
-	if err != nil {
-		s.logger.Log("err", err)
-		// level.Error(log.With(logger)).Log("err", err)
-		return
-	}
-
-	go func() {
-		s.logger.Log("msg", "started go routine")
-		defer s.watcher.Close()
-		// Open the current segment.
-		// lock := &sync.Mutex{}
-		var segment *wal.Segment
-		segment, err = wal.OpenReadSegment(wal.SegmentName(s.walDir, n))
-		defer segment.Close()
-
-		for {
-			select {
-			case event, ok := <-s.watcher.Events:
-				s.logger.Log("msg", "watcher event")
-				if !ok {
-					return
-				}
-				if event.Op&fsnotify.Write == fsnotify.Write {
-					s.logger.Log("event", "write", "file", event.Name)
-					s.decodeSegment(segment)
-				}
-				if event.Op&fsnotify.Create == fsnotify.Create {
-					// TODO: callum, we should check if the file name is a new segment and not a checkpoint or something else
-					s.logger.Log("event", "create", "file", event.Name)
-					segment.Close()
-					n++
-					// Reset series map, each Segment file keeps track of series independently and there may be series churn over time.
-					s.series = make(map[uint64]tsdbLabels.Labels)
-					segment, err = wal.OpenReadSegment(wal.SegmentName(s.walDir, n))
-				}
-			case err, ok := <-s.watcher.Errors:
-				if !ok {
-					return
-				}
-				s.logger.Log("err", err)
-			}
-		}
-	}()
-
-	err = s.watcher.Add(s.walDir)
-	if err != nil {
-		s.logger.Log("err", err)
-		// level.Error(log.With(logger)).Log("err", err)
-		return
-	}
-	// <-done
+func (s *Storage) SetDB(db *tsdb.DB) {
+	s.db = db
 }
 
 // StartTime implements the Storage interface.
@@ -316,9 +178,9 @@ func (s *Storage) Close() error {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 
-	// for _, q := range s.queues {
-	// 	q.Stop()
-	// }
+	for q := range s.queues {
+		q.Stop()
+	}
 
 	return nil
 }

@@ -23,7 +23,6 @@ import (
 	"github.com/gogo/protobuf/proto"
 	"github.com/golang/snappy"
 	"github.com/prometheus/common/model"
-
 	"github.com/prometheus/prometheus/pkg/labels"
 	"github.com/prometheus/prometheus/prompb"
 	"github.com/prometheus/prometheus/storage"
@@ -78,28 +77,6 @@ func EncodeReadResponse(resp *prompb.ReadResponse, w http.ResponseWriter) error 
 	compressed := snappy.Encode(nil, data)
 	_, err = w.Write(compressed)
 	return err
-}
-
-// ToWriteRequest converts an array of samples into a WriteRequest proto.
-func ToWriteRequest(samples []*model.Sample) *prompb.WriteRequest {
-	req := &prompb.WriteRequest{
-		Timeseries: make([]*prompb.TimeSeries, 0, len(samples)),
-	}
-
-	for _, s := range samples {
-		ts := prompb.TimeSeries{
-			Labels: MetricToLabelProtos(s.Metric),
-			Samples: []prompb.Sample{
-				{
-					Value:     float64(s.Value),
-					Timestamp: int64(s.Timestamp),
-				},
-			},
-		}
-		req.Timeseries = append(req.Timeseries, &ts)
-	}
-
-	return req
 }
 
 // ToQuery builds a Query proto.
@@ -364,21 +341,6 @@ func fromLabelMatchers(matchers []*prompb.LabelMatcher) ([]*labels.Matcher, erro
 	return result, nil
 }
 
-// MetricToLabelProtos builds a []*prompb.Label from a model.Metric
-func MetricToLabelProtos(metric model.Metric) []*prompb.Label {
-	labels := make([]*prompb.Label, 0, len(metric))
-	for k, v := range metric {
-		labels = append(labels, &prompb.Label{
-			Name:  string(k),
-			Value: string(v),
-		})
-	}
-	sort.Slice(labels, func(i int, j int) bool {
-		return labels[i].Name < labels[j].Name
-	})
-	return labels
-}
-
 // LabelProtosToMetric unpack a []*prompb.Label to a model.Metric
 func LabelProtosToMetric(labelPairs []*prompb.Label) model.Metric {
 	metric := make(model.Metric, len(labelPairs))
@@ -386,6 +348,22 @@ func LabelProtosToMetric(labelPairs []*prompb.Label) model.Metric {
 		metric[model.LabelName(l.Name)] = model.LabelValue(l.Value)
 	}
 	return metric
+}
+
+func labelsetToLabels(ls model.LabelSet) labels.Labels {
+	var l labels.Labels
+	keys := make([]string, 0, len(ls))
+
+	for k := range ls {
+		keys = append(keys, string(k))
+	}
+	sort.Strings(keys)
+
+	for _, k := range keys {
+		ln := model.LabelName(k)
+		l = append(l, labels.Label{Name: k, Value: string(ls[ln])})
+	}
+	return l
 }
 
 func labelProtosToLabels(labelPairs []*prompb.Label) labels.Labels {
