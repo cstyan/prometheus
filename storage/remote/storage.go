@@ -208,6 +208,8 @@ func (s *Storage) decodeSegment(segment *wal.Segment) bool {
 	}
 }
 
+// StartWALWatcher is used to start a go routine that watches the WAL directory for updates
+// to segment files and new segment files, decoding samples that it reads.
 func (s *Storage) StartWALWatcher() {
 	if s.series == nil {
 		s.series = make(map[uint64]tsdbLabels.Labels)
@@ -239,7 +241,6 @@ func (s *Storage) StartWALWatcher() {
 		return
 	}
 
-	// done := make(chan bool)
 	go func() {
 		s.logger.Log("msg", "started go routine")
 		defer s.watcher.Close()
@@ -257,17 +258,16 @@ func (s *Storage) StartWALWatcher() {
 					return
 				}
 				if event.Op&fsnotify.Write == fsnotify.Write {
-					// level.Info(logger).Log("event", "write", "file", event.Name)
 					s.logger.Log("event", "write", "file", event.Name)
 					s.decodeSegment(segment)
 				}
 				if event.Op&fsnotify.Create == fsnotify.Create {
 					// TODO: callum, we should check if the file name is a new segment and not a checkpoint or something else
-					// level.Info(logger).Log("event", "create", "file", event.Name)
 					s.logger.Log("event", "create", "file", event.Name)
-
 					segment.Close()
 					n++
+					// Reset series map, each Segment file keeps track of series independently and there may be series churn over time.
+					s.series = make(map[uint64]tsdbLabels.Labels)
 					segment, err = wal.OpenReadSegment(wal.SegmentName(s.walDir, n))
 				}
 			case err, ok := <-s.watcher.Errors:
@@ -275,11 +275,8 @@ func (s *Storage) StartWALWatcher() {
 					return
 				}
 				s.logger.Log("err", err)
-
-				// level.Error(log.With(logger)).Log("err", err)
 			}
 		}
-		s.logger.Log("msg", "ending go routine")
 	}()
 
 	err = s.watcher.Add(s.walDir)
