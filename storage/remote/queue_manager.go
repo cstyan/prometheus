@@ -166,7 +166,6 @@ type QueueManager struct {
 
 	seriesMtx sync.Mutex
 	series    map[uint64][]*prompb.Label
-	db        *tsdb.DB
 
 	shardsMtx   sync.Mutex
 	shards      *shards
@@ -318,18 +317,6 @@ func (t *QueueManager) processExternalLabels(ls model.LabelSet) {
 			ls[ln] = lv
 		}
 	}
-}
-
-func (t *QueueManager) TrimSeries() {
-	t.seriesMtx.Lock()
-	defer t.seriesMtx.Unlock()
-
-	refs := t.db.AllSeriesIDs()
-	newSeries := make(map[uint64][]*prompb.Label)
-	for _, k := range refs[:] {
-		newSeries[k] = t.series[k]
-	}
-	t.series = newSeries
 }
 
 func (t *QueueManager) updateShardsLoop() {

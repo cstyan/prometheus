@@ -104,9 +104,7 @@ func (s *Storage) ApplyConfig(conf *config.Config) error {
 			rwConf.WriteRelabelConfigs,
 			c,
 			s.flushDeadline)
-		if s.db != nil {
-			q.db = s.db
-		}
+
 		newQueues[q] = a
 	}
 
