@@ -279,17 +279,6 @@ func (db *DB) Dir() string {
 	return db.dir
 }
 
-// AllSeriesIDs returns a slice of all the series ID's currently in Head.
-func (db *DB) AllSeriesIDs() []uint64 {
-	fmt.Printf("db %+v\n", db.Dir())
-	return db.head.allSeriesIDs()
-}
-
-// GetAllLabels returns all the labels currently in the data of the head by series reference ID.
-func (db *DB) GetAllLabels() map[uint64]labels.Labels {
-	return db.head.getAllLabels()
-}
-
 func (db *DB) run() {
 	defer close(db.donec)
 

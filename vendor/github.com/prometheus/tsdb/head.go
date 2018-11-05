@@ -914,27 +914,12 @@ func (h *Head) MaxTime() int64 {
 	return atomic.LoadInt64(&h.maxTime)
 }
 
-func (h *Head) getAllLabels() map[uint64]labels.Labels {
-	return h.series.getAllLabels()
-}
-
 // Close flushes the WAL and closes the head.
 func (h *Head) Close() error {
 	if h.wal == nil {
 		return nil
 	}
 	return h.wal.Close()
-}
-
-// Return a list of all series ID's currently in Head
-func (h *Head) allSeriesIDs() []uint64 {
-	var series []uint64
-	for _, s := range h.series.series {
-		for k := range s {
-			series = append(series[:], k)
-		}
-	}
-	return series
 }
 
 type headChunkReader struct {
@@ -1280,18 +1265,6 @@ func (s *stripeSeries) gc(mint int64) (map[uint64]struct{}, int) {
 	}
 
 	return deleted, rmChunks
-}
-
-func (s *stripeSeries) getAllLabels() map[uint64]labels.Labels {
-	out := make(map[uint64]labels.Labels)
-	for i, sm := range s.series {
-		s.locks[i].RLock()
-		for k, v := range sm {
-			out[k] = v.lset
-		}
-		s.locks[i].RUnlock()
-	}
-	return out
 }
 
 func (s *stripeSeries) getByID(id uint64) *memSeries {
