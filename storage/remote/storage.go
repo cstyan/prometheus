@@ -40,7 +40,6 @@ type Storage struct {
 	walDir          string
 	queuesMtx       sync.Mutex
 	queues          map[*QueueManager]struct{}
-	failedQueues    map[*QueueManager]struct{}
 	db              *tsdb.DB
 	samplesIn       *ewmaRate
 	samplesInMetric prometheus.Counter
@@ -64,7 +63,6 @@ func NewStorage(l log.Logger, reg prometheus.Registerer, stCallback startTimeCal
 		walDir:                 walDir,
 		db:                     db,
 		queues:                 make(map[*QueueManager]struct{}),
-		failedQueues:           make(map[*QueueManager]struct{}),
 		samplesIn:              newEWMARate(ewmaWeight, shardUpdateDuration),
 		samplesInMetric: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "prometheus_remote_storage_samples_in_total",
