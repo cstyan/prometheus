@@ -305,6 +305,13 @@ func (t *QueueManager) StoreSeries(series []tsdb.RefSeries) {
 	}
 }
 
+// Clear all series stored in series labels cache.
+func (t *QueueManager) ClearSeries() {
+	t.seriesMtx.Lock()
+	defer t.seriesMtx.Unlock()
+	t.series = make(map[uint64][]*prompb.Label)
+}
+
 func (t *QueueManager) processExternalLabels(ls model.LabelSet) {
 	for ln, lv := range t.externalLabels {
 		if _, ok := ls[ln]; !ok {

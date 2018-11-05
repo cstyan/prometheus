@@ -39,7 +39,7 @@ var (
 type WriteTo interface {
 	Append([]tsdb.RefSample) bool
 	StoreSeries([]tsdb.RefSeries)
-	TrimSeries()
+	ClearSeries()
 }
 
 // WALWatcher watches the TSDB WAL for a given StorageClient (remote write config).
@@ -109,6 +109,19 @@ func (w *WALWatcher) readSeriesRecords(r *wal.Reader) {
 	}
 }
 
+// Read all the series records from a Checkpoint directory.
+func (w *WALWatcher) readCheckpoint(checkpointDir string) error {
+	sr, err := wal.NewSegmentsReader(checkpointDir)
+	if err != nil {
+		return errors.Wrap(err, "open checkpoint")
+	}
+	defer sr.Close()
+
+	w.readSeriesRecords(wal.NewReader(sr))
+	level.Debug(w.logger).Log("msg", "read series references from checkpoint", "checkpoint", checkpointDir)
+	return nil
+}
+
 // When starting the WAL watcher, there is potentially an existing WAL. In that case, we
 // should read to the end of the newest existing segment before listening for file events,
 // storing data from series records along the way.
@@ -120,15 +133,10 @@ func (w *WALWatcher) readToEnd(walDir string, lastSegment int) (*wal.Segment, er
 		return nil, errors.Wrap(err, "find last checkpoint")
 	}
 	if err == nil {
-		sr, err := wal.NewSegmentsReader(filepath.Join(walDir, dir))
+		err = w.readCheckpoint(path.Join(walDir, dir))
 		if err != nil {
-			return nil, errors.Wrap(err, "open checkpoint")
+			return nil, err
 		}
-		defer sr.Close()
-
-		// A corrupted checkpoint is a hard error for now and requires user
-		// intervention. There's likely little data that can be recovered anyway.
-		w.readSeriesRecords(wal.NewReader(sr))
 		startFrom++
 	}
 
@@ -177,8 +185,14 @@ func (w *WALWatcher) watch(segment *wal.Segment) bool {
 					return true
 				}
 				if ok := checkpointRegex.MatchString(fileName); ok {
-					// Head was truncated and WAL segments were checkpointed, so we should trim older series
-					w.writer.TrimSeries()
+					// Head was truncated and WAL segments were checkpointed, so we should
+					// read the Checkpoint to find out what series are still active.
+					w.writer.ClearSeries()
+					err := w.readCheckpoint(path.Join(w.walDir, fileName))
+					if err != nil {
+						level.Error(w.logger).Log("err", err)
+						return false
+					}
 				}
 			}
 		case err, ok := <-w.watcher.Errors:
@@ -242,7 +256,7 @@ func (w *WALWatcher) runWatcher() {
 	}
 
 	for {
-		level.Info(w.logger).Log("msg", "watching segment", "segment", w.currentSegment)
+		level.Debug(w.logger).Log("msg", "watching segment", "segment", w.currentSegment)
 		// On start, after reading the existing WAL for series records, we have a pointer to what is the latest segment.
 		// On subsequent calls to this function, currentSegment will have been incremented and we should open that segment.
 		ok := w.watch(segment)
