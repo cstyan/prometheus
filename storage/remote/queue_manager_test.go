@@ -23,6 +23,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gogo/protobuf/proto"
+	"github.com/golang/snappy"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/config"
 	"github.com/prometheus/prometheus/prompb"
@@ -129,11 +131,20 @@ func (c *TestStorageClient) waitForExpectedSamples(t *testing.T) {
 	}
 }
 
-func (c *TestStorageClient) Store(_ context.Context, req *prompb.WriteRequest) error {
+func (c *TestStorageClient) Store(_ context.Context, req []byte) error {
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
+	reqBuf, err := snappy.Decode(nil, req)
+	if err != nil {
+		return err
+	}
+
+	var reqProto prompb.WriteRequest
+	if err := proto.Unmarshal(reqBuf, &reqProto); err != nil {
+		return err
+	}
 	count := 0
-	for _, ts := range req.Timeseries {
+	for _, ts := range reqProto.Timeseries {
 		var seriesName string
 		labels := labelProtosToLabels(ts.Labels)
 		for _, label := range labels {
@@ -164,21 +175,19 @@ func TestSampleDelivery(t *testing.T) {
 	c.expectSamples(samples[:len(samples)/2], series)
 
 	cfg := config.DefaultQueueConfig
+	cfg.BatchSendDeadline = model.Duration(100 * time.Millisecond)
 	cfg.MaxShards = 1
-	m := NewQueueManager(nil, nil, cfg, nil, nil, c, defaultFlushDeadline)
+	m := NewQueueManager(nil, "", newEWMARate(ewmaWeight, shardUpdateDuration), cfg, nil, nil, c, defaultFlushDeadline)
 	m.series = refSeriesToLabelsProto(series)
 
 	// These should be received by the client.
-	for _, s := range samples[:len(samples)/2] {
-		m.Append(s)
-	}
-	// These will be dropped because the queue is full.
-	for _, s := range samples[len(samples)/2:] {
-		m.Append(s)
-	}
+	m.Append(samples[:len(samples)/2])
 	m.Start()
 	defer m.Stop()
 
+	c.waitForExpectedSamples(t)
+	m.Append(samples[len(samples)/2:])
+	c.expectSamples(samples[len(samples)/2:], series)
 	c.waitForExpectedSamples(t)
 }
 
@@ -191,47 +200,48 @@ func TestSampleDeliveryTimeout(t *testing.T) {
 	cfg := config.DefaultQueueConfig
 	cfg.MaxShards = 1
 	cfg.BatchSendDeadline = model.Duration(100 * time.Millisecond)
-	m := NewQueueManager(nil, nil, cfg, nil, nil, c, defaultFlushDeadline)
+	m := NewQueueManager(nil, "", newEWMARate(ewmaWeight, shardUpdateDuration), cfg, nil, nil, c, defaultFlushDeadline)
 	m.series = refSeriesToLabelsProto(series)
 	m.Start()
 	defer m.Stop()
 
 	// Send the samples twice, waiting for the samples in the meantime.
 	c.expectSamples(samples, series)
-	for _, s := range samples {
-		m.Append(s)
-	}
+	m.Append(samples)
 	c.waitForExpectedSamples(t)
 
 	c.expectSamples(samples, series)
-	for _, s := range samples {
-		m.Append(s)
-	}
+	m.Append(samples)
 	c.waitForExpectedSamples(t)
 }
 
 func TestSampleDeliveryOrder(t *testing.T) {
 	ts := 10
 	n := config.DefaultQueueConfig.MaxSamplesPerSend * ts
-	samples, series := createTimeseries(n)
+	samples := make([]tsdb.RefSample, 0, n)
+	series := make([]tsdb.RefSeries, 0, n)
+	for i := 0; i < n; i++ {
+		name := fmt.Sprintf("test_metric_%d", i%ts)
+		samples = append(samples, tsdb.RefSample{
+			Ref: uint64(i),
+			T:   int64(i),
+			V:   float64(i),
+		})
+		series = append(series, tsdb.RefSeries{
+			Ref:    uint64(i),
+			Labels: labels.Labels{labels.Label{Name: "__name__", Value: name}},
+		})
+	}
 
 	c := NewTestStorageClient()
 	c.expectSamples(samples, series)
-	m := NewQueueManager(nil, nil, config.DefaultQueueConfig, nil, nil, c, defaultFlushDeadline)
+	m := NewQueueManager(nil, "", newEWMARate(ewmaWeight, shardUpdateDuration), config.DefaultQueueConfig, nil, nil, c, defaultFlushDeadline)
 	m.series = refSeriesToLabelsProto(series)
 
-	// These should be received by the client.
-	go func() {
-		for _, s := range samples {
-			for {
-				if ok := m.Append(s); ok {
-					break
-				}
-			}
-		}
-	}()
 	m.Start()
 	defer m.Stop()
+	// These should be received by the client.
+	m.Append(samples)
 	c.waitForExpectedSamples(t)
 }
 
@@ -251,7 +261,7 @@ func NewTestBlockedStorageClient() *TestBlockingStorageClient {
 	}
 }
 
-func (c *TestBlockingStorageClient) Store(ctx context.Context, _ *prompb.WriteRequest) error {
+func (c *TestBlockingStorageClient) Store(ctx context.Context, _ []byte) error {
 	atomic.AddUint64(&c.numCalls, 1)
 	select {
 	case <-c.block:
@@ -294,17 +304,16 @@ func tsdbLabelsToLabelsProto(labels labels.Labels) []*prompb.Label {
 }
 
 func TestShutdown(t *testing.T) {
-	deadline := 10 * time.Second
+	deadline := 5 * time.Second
 	c := NewTestBlockedStorageClient()
-	m := NewQueueManager(nil, nil, config.DefaultQueueConfig, nil, nil, c, deadline)
+	m := NewQueueManager(nil, "", newEWMARate(ewmaWeight, shardUpdateDuration), config.DefaultQueueConfig, nil, nil, c, deadline)
 	samples, series := createTimeseries(config.DefaultQueueConfig.MaxSamplesPerSend)
 	for _, s := range series {
 		m.series[s.Ref] = tsdbLabelsToLabelsProto(s.Labels)
 	}
-	for _, s := range samples {
-		m.Append(s)
-	}
+
 	m.Start()
+	m.Append(samples)
 
 	start := time.Now()
 	m.Stop()

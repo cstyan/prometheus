@@ -144,6 +144,9 @@ func (w *WALWatcher) readToEnd(walDir string, lastSegment int) (*wal.Segment, er
 	// We want to start the WAL Watcher from the end of the last segment on start,
 	// so we make sure to return the wal.Segment pointer
 	segment, err := wal.OpenReadSegment(wal.SegmentName(w.walDir, lastSegment))
+	if err != nil {
+		return nil, err
+	}
 	w.readSeriesRecords(wal.NewReader(segment))
 	return segment, nil
 }
@@ -261,6 +264,11 @@ func (w *WALWatcher) runWatcher() {
 		}
 		w.currentSegment++
 		segment, err = wal.OpenReadSegment(wal.SegmentName(w.walDir, w.currentSegment))
+		// TODO: callum, is this error really fatal?
+		if err != nil {
+			level.Error(w.logger).Log("err", err)
+			return
+		}
 	}
 }
 

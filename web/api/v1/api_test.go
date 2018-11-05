@@ -31,7 +31,6 @@ import (
 	"time"
 
 	"github.com/go-kit/kit/log"
-
 	"github.com/gogo/protobuf/proto"
 	"github.com/golang/snappy"
 	"github.com/prometheus/client_golang/prometheus"
@@ -39,7 +38,6 @@ import (
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/common/promlog"
 	"github.com/prometheus/common/route"
-
 	"github.com/prometheus/prometheus/config"
 	"github.com/prometheus/prometheus/pkg/gate"
 	"github.com/prometheus/prometheus/pkg/labels"
@@ -51,7 +49,6 @@ import (
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/storage/remote"
 	"github.com/prometheus/prometheus/util/testutil"
-	"github.com/prometheus/tsdb"
 )
 
 type testTargetRetriever struct{}
@@ -267,11 +264,10 @@ func TestEndpoints(t *testing.T) {
 		testutil.Ok(t, err)
 		defer os.RemoveAll(dbDir)
 
-		db, err := tsdb.Open(dbDir, logger, nil, nil)
 		testutil.Ok(t, err)
 		remote := remote.NewStorage(logger, prometheus.DefaultRegisterer, func() (int64, error) {
 			return 0, nil
-		}, db, 1*time.Second)
+		}, dbDir, 1*time.Second)
 
 		err = remote.ApplyConfig(&config.Config{
 			RemoteReadConfigs: []*config.RemoteReadConfig{
