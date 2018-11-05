@@ -25,7 +25,6 @@ import (
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
 	"github.com/pkg/errors"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/tsdb"
 	"github.com/prometheus/tsdb/wal"
 	fsnotify "gopkg.in/fsnotify/fsnotify.v1"
@@ -44,13 +43,11 @@ type WriteTo interface {
 
 // WALWatcher watches the TSDB WAL for a given WriteTo.
 type WALWatcher struct {
-	writer  WriteTo
-	logger  log.Logger
-	walDir  string
-	watcher *fsnotify.Watcher
-
-	currentSegment  int
-	lastForwardedTs prometheus.Gauge
+	writer         WriteTo
+	logger         log.Logger
+	walDir         string
+	watcher        *fsnotify.Watcher
+	currentSegment int
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -71,11 +68,6 @@ func NewWALWatcher(logger log.Logger, writer WriteTo, walDir string) *WALWatcher
 		cancel: cancel,
 		quit:   make(chan struct{}),
 	}
-	w.lastForwardedTs = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "prometheus_remote_write_last_forwarded_timestamp",
-		Help: "Timestamp of the last time the WAL watcher sent a sample to queue managers.",
-	})
-	prometheus.MustRegister(w.lastForwardedTs)
 	return w
 }
 

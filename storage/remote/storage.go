@@ -24,7 +24,6 @@ import (
 	"github.com/prometheus/prometheus/config"
 	"github.com/prometheus/prometheus/pkg/labels"
 	"github.com/prometheus/prometheus/storage"
-	"github.com/prometheus/tsdb"
 )
 
 // Callback func that return the oldest timestamp stored in a storage.
@@ -40,7 +39,6 @@ type Storage struct {
 	walDir          string
 	queuesMtx       sync.Mutex
 	queues          map[*QueueManager]struct{}
-	db              *tsdb.DB
 	samplesIn       *ewmaRate
 	samplesInMetric prometheus.Counter
 
@@ -51,7 +49,7 @@ type Storage struct {
 }
 
 // NewStorage returns a remote.Storage.
-func NewStorage(l log.Logger, reg prometheus.Registerer, stCallback startTimeCallback, walDir string, db *tsdb.DB, flushDeadline time.Duration) *Storage {
+func NewStorage(l log.Logger, reg prometheus.Registerer, stCallback startTimeCallback, walDir string, flushDeadline time.Duration) *Storage {
 	if l == nil {
 		l = log.NewNopLogger()
 	}
@@ -61,7 +59,6 @@ func NewStorage(l log.Logger, reg prometheus.Registerer, stCallback startTimeCal
 		localStartTimeCallback: stCallback,
 		flushDeadline:          flushDeadline,
 		walDir:                 walDir,
-		db:                     db,
 		queues:                 make(map[*QueueManager]struct{}),
 		samplesIn:              newEWMARate(ewmaWeight, shardUpdateDuration),
 		samplesInMetric: prometheus.NewCounter(prometheus.CounterOpts{
@@ -140,10 +137,6 @@ func (s *Storage) ApplyConfig(conf *config.Config) error {
 	}
 
 	return nil
-}
-
-func (s *Storage) SetDB(db *tsdb.DB) {
-	s.db = db
 }
 
 // StartTime implements the Storage interface.
