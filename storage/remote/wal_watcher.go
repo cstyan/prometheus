@@ -42,7 +42,7 @@ type WriteTo interface {
 	ClearSeries()
 }
 
-// WALWatcher watches the TSDB WAL for a given StorageClient (remote write config).
+// WALWatcher watches the TSDB WAL for a given WriteTo.
 type WALWatcher struct {
 	writer  WriteTo
 	logger  log.Logger
@@ -57,7 +57,7 @@ type WALWatcher struct {
 	quit   chan struct{}
 }
 
-// NewWALWatcher creates a new WAL watcher for a given remote write client.
+// NewWALWatcher creates a new WAL watcher for a given WriteTo.
 func NewWALWatcher(logger log.Logger, writer WriteTo, walDir string) *WALWatcher {
 	if logger == nil {
 		logger = log.NewNopLogger()
@@ -163,13 +163,15 @@ func (w *WALWatcher) watch(segment *wal.Segment) bool {
 	for {
 		select {
 		case <-w.quit:
+			level.Info(w.logger).Log("quitting WAL watcher watch loop")
 			return false
 		// TODO: callum, handle maintaining the WAL pointer somehow across apply configs?
 		case event, ok := <-w.watcher.Events:
 			_, fileName := filepath.Split(event.Name)
 
+			// TODO: callum, in what case do we get !ok?
 			if !ok {
-				// TODO: callum, in what case do we get !ok?
+				level.Info(w.logger).Log("exiting WAL watcher watch loop")
 				return false
 			}
 			if event.Op&fsnotify.Write == fsnotify.Write {
@@ -191,16 +193,18 @@ func (w *WALWatcher) watch(segment *wal.Segment) bool {
 					err := w.readCheckpoint(path.Join(w.walDir, fileName))
 					if err != nil {
 						level.Error(w.logger).Log("err", err)
+						level.Info(w.logger).Log("exiting WAL watcher watch loop")
 						return false
 					}
 				}
 			}
 		case err, ok := <-w.watcher.Errors:
 			// TODO: callum, are these errors recoverable?
+			level.Error(w.logger).Log("err", err)
 			if !ok {
+				level.Info(w.logger).Log("exiting WAL watcher watch loop")
 				return false
 			}
-			level.Error(w.logger).Log("err", err)
 		}
 	}
 }
