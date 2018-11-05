@@ -288,13 +288,6 @@ func (w *WALWatcher) forwardSamples(s []tsdb.RefSample) error {
 }
 
 func (w *WALWatcher) decodeSegment(segment *wal.Segment) {
-	// todo: callum, is there an easy way to detect if r.Next() has returned the last possible record in a segment.
-	// For now just recover from the panic that is thrown if we call r.Next() when we shouldn't have
-	defer func() {
-		if r := recover(); r != nil {
-			level.Error(log.With(w.logger)).Log("segment", segment.Name(), "err", r)
-		}
-	}()
 	r := wal.NewReader(segment)
 	var (
 		dec      tsdb.RecordDecoder

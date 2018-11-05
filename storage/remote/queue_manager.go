@@ -15,6 +15,7 @@ package remote
 
 import (
 	"context"
+	"errors"
 	"math"
 	"sync"
 	"sync/atomic"
@@ -173,6 +174,7 @@ type QueueManager struct {
 	reshardChan chan int
 	quit        chan struct{}
 	wg          sync.WaitGroup
+	stopped     bool
 
 	samplesIn, samplesOut, samplesOutDuration *ewmaRate
 	integralAccumulator                       float64
@@ -200,6 +202,7 @@ func NewQueueManager(logger log.Logger, walDir string, samplesIn *ewmaRate, cfg 
 		numShards:   1,
 		reshardChan: make(chan int),
 		quit:        make(chan struct{}),
+		stopped:     false,
 
 		samplesIn:          samplesIn,
 		samplesOut:         newEWMARate(ewmaWeight, shardUpdateDuration),
@@ -227,7 +230,6 @@ func NewQueueManager(logger log.Logger, walDir string, samplesIn *ewmaRate, cfg 
 // Always returns nil.
 func (t *QueueManager) Append(s []tsdb.RefSample) bool {
 	tempSamples := make([]tsdb.RefSample, 0, len(s))
-
 	t.seriesMtx.Lock()
 	for _, sample := range s {
 		// If we have no labels for the series, due to relabelling or otherwise, don't send the sample.
@@ -240,9 +242,11 @@ func (t *QueueManager) Append(s []tsdb.RefSample) bool {
 	t.seriesMtx.Unlock()
 
 	t.shardsMtx.Lock()
-	defer t.shardsMtx.Unlock()
+	shardsCopy := t.shards
+	t.shardsMtx.Unlock()
+
 	for _, sample := range tempSamples[:len(tempSamples)] {
-		if err := t.shards.enqueue(sample); err != nil {
+		if err := shardsCopy.enqueue(sample); err != nil {
 			level.Error(t.logger).Log("err", err)
 			return false
 		}
@@ -280,6 +284,7 @@ func (t *QueueManager) Stop() {
 
 	t.shardsMtx.Lock()
 	defer t.shardsMtx.Unlock()
+	t.stopped = true
 	t.shards.stop(t.flushDeadline)
 
 	level.Info(t.logger).Log("msg", "Remote storage stopped.")
@@ -455,7 +460,6 @@ func (t *QueueManager) newShards(numShards int) *shards {
 
 func (t *QueueManager) buildWriteRequest(samples []tsdb.RefSample, series map[uint64][]*prompb.Label) ([]byte, error) {
 	t.seriesMtx.Lock()
-	defer t.seriesMtx.Unlock()
 	req := &prompb.WriteRequest{
 		Timeseries: make([]*prompb.TimeSeries, 0, len(samples)),
 	}
@@ -471,6 +475,7 @@ func (t *QueueManager) buildWriteRequest(samples []tsdb.RefSample, series map[ui
 		}
 		req.Timeseries = append(req.Timeseries, &ts)
 	}
+	t.seriesMtx.Unlock()
 
 	data, err := proto.Marshal(req)
 	if err != nil {
@@ -512,7 +517,6 @@ func (s *shards) stop(deadline time.Duration) {
 }
 
 func (s *shards) enqueue(sample tsdb.RefSample) error {
-
 	shard := uint64(sample.Ref) % uint64(len(s.queues))
 	for {
 		select {
@@ -521,8 +525,11 @@ func (s *shards) enqueue(sample tsdb.RefSample) error {
 		case s.queues[shard] <- sample:
 			s.qm.samplesIn.incr(1)
 			return nil
+		default:
+			if s.qm.stopped {
+				return errors.New("cannot enqueue sample, shard is being stopped")
+			}
 		}
-
 	}
 }
 
