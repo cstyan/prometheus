@@ -117,7 +117,7 @@ var (
 		// samples that have been enqueued. Theoretically we should only ever have about 110 samples
 		// per shard pending. At 1000 shards that's 110k.
 		Capacity:          10,
-		BatchSendDeadline: model.Duration(5 * time.Second),
+		BatchSendDeadline: model.Duration(time.Second),
 
 		// Max number of times to retry a batch on recoverable errors.
 		MaxRetries: 3,

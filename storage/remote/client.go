@@ -54,7 +54,6 @@ func NewClient(index int, conf *ClientConfig) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	return &Client{
 		index:   index,
 		url:     conf.URL,

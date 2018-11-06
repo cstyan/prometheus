@@ -76,6 +76,7 @@ func (w *WALWatcher) Start() {
 }
 
 func (w *WALWatcher) Stop() {
+	w.logger.Log("wal watcher stopped called")
 	close(w.quit)
 	return
 }
@@ -151,7 +152,7 @@ func (w *WALWatcher) readToEnd(walDir string, lastSegment int) (*wal.Segment, er
 	return segment, nil
 }
 
-func (w *WALWatcher) watch(segment *wal.Segment) bool {
+func (w *WALWatcher) watch(segment *wal.Segment) error {
 	currentSegmentName := fmt.Sprintf("%08d", w.currentSegment)
 	defer segment.Close()
 
@@ -159,7 +160,7 @@ func (w *WALWatcher) watch(segment *wal.Segment) bool {
 		select {
 		case <-w.quit:
 			level.Info(w.logger).Log("quitting WAL watcher watch loop")
-			return false
+			return errors.New("quit channel")
 		// TODO: callum, handle maintaining the WAL pointer somehow across apply configs?
 		case event, ok := <-w.watcher.Events:
 			_, fileName := filepath.Split(event.Name)
@@ -167,7 +168,7 @@ func (w *WALWatcher) watch(segment *wal.Segment) bool {
 			// TODO: callum, in what case do we get !ok?
 			if !ok {
 				level.Info(w.logger).Log("exiting WAL watcher watch loop")
-				return false
+				return errors.New("watcher events channel was closed")
 			}
 			if event.Op&fsnotify.Write == fsnotify.Write {
 				if fileName != currentSegmentName {
@@ -179,7 +180,7 @@ func (w *WALWatcher) watch(segment *wal.Segment) bool {
 				if ok := segmentRegex.MatchString(fileName); ok {
 					// TODO: callum, ensure the create was for the segment n+1 and not n+2 or more
 					// Read the current segment one last time in case we receive events out of order. Not sure if this is necessary.
-					return true
+					return nil
 				}
 				if ok := checkpointRegex.MatchString(fileName); ok {
 					// Head was truncated and WAL segments were checkpointed, so we should
@@ -189,7 +190,7 @@ func (w *WALWatcher) watch(segment *wal.Segment) bool {
 					if err != nil {
 						level.Error(w.logger).Log("err", err)
 						level.Info(w.logger).Log("exiting WAL watcher watch loop")
-						return false
+						return err
 					}
 				}
 			}
@@ -198,7 +199,7 @@ func (w *WALWatcher) watch(segment *wal.Segment) bool {
 			level.Error(w.logger).Log("err", err)
 			if !ok {
 				level.Info(w.logger).Log("exiting WAL watcher watch loop")
-				return false
+				return errors.New("watcher errors channel was closed")
 			}
 		}
 	}
@@ -255,11 +256,12 @@ func (w *WALWatcher) runWatcher() {
 	}
 
 	for {
-		level.Debug(w.logger).Log("msg", "watching segment", "segment", w.currentSegment)
+		level.Info(w.logger).Log("msg", "watching segment", "segment", w.currentSegment)
 		// On start, after reading the existing WAL for series records, we have a pointer to what is the latest segment.
 		// On subsequent calls to this function, currentSegment will have been incremented and we should open that segment.
-		ok := w.watch(segment)
-		if !ok {
+		err := w.watch(segment)
+		if err != nil {
+			level.Error(w.logger).Log("msg", "runWatcher is ending", "err", err)
 			return
 		}
 		w.currentSegment++

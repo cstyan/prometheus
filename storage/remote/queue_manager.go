@@ -91,21 +91,21 @@ var (
 		},
 		[]string{queue},
 	)
-	queueLength = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Namespace: namespace,
-			Subsystem: subsystem,
-			Name:      "queue_length",
-			Help:      "The number of processed samples queued to be sent to the remote storage.",
-		},
-		[]string{queue},
-	)
 	queueSentTimestamp = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: namespace,
 			Subsystem: subsystem,
 			Name:      "queue_last_sent_timestamp",
 			Help:      "Timestamp of the last successful send by this queue.",
+		},
+		[]string{queue},
+	)
+	queuePendingSamples = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: namespace,
+			Subsystem: subsystem,
+			Name:      "pending_samples",
+			Help:      "The number of samples pending in the queues shards to be sent to the remote storage.",
 		},
 		[]string{queue},
 	)
@@ -134,8 +134,8 @@ func init() {
 	prometheus.MustRegister(failedSamplesTotal)
 	prometheus.MustRegister(droppedSamplesTotal)
 	prometheus.MustRegister(sentBatchDuration)
-	prometheus.MustRegister(queueLength)
 	prometheus.MustRegister(queueSentTimestamp)
+	prometheus.MustRegister(queuePendingSamples)
 	prometheus.MustRegister(shardCapacity)
 	prometheus.MustRegister(numShards)
 }
@@ -155,15 +155,16 @@ type StorageClient interface {
 type QueueManager struct {
 	logger log.Logger
 
-	flushDeadline  time.Duration
-	cfg            config.QueueConfig
-	externalLabels model.LabelSet
-	relabelConfigs []*config.RelabelConfig
-	client         StorageClient
-	queueName      string
-	logLimiter     *rate.Limiter
-	watcher        *WALWatcher
-	sentTimestamp  prometheus.Gauge
+	flushDeadline       time.Duration
+	cfg                 config.QueueConfig
+	externalLabels      model.LabelSet
+	relabelConfigs      []*config.RelabelConfig
+	client              StorageClient
+	queueName           string
+	logLimiter          *rate.Limiter
+	watcher             *WALWatcher
+	sentTimestamp       int64
+	sentTimestampMetric prometheus.Gauge
 
 	seriesMtx sync.Mutex
 	series    map[uint64][]prompb.Label
@@ -209,7 +210,7 @@ func NewQueueManager(logger log.Logger, walDir string, samplesIn *ewmaRate, cfg 
 		samplesOutDuration: newEWMARate(ewmaWeight, shardUpdateDuration),
 	}
 
-	t.sentTimestamp = queueSentTimestamp.WithLabelValues(t.queueName)
+	t.sentTimestampMetric = queueSentTimestamp.WithLabelValues(t.queueName)
 	t.watcher = NewWALWatcher(logger, t, walDir)
 	t.shards = t.newShards(t.numShards)
 
@@ -334,6 +335,12 @@ func (t *QueueManager) updateShardsLoop() {
 	for {
 		select {
 		case <-ticker.C:
+			now := time.Now().Unix()
+			threshold := int64(time.Duration(2 * t.cfg.BatchSendDeadline).Seconds())
+			if now-t.sentTimestamp > threshold {
+				level.Debug(t.logger).Log("msg", "Skipping resharding, last successful send was beyond threshold")
+				continue
+			}
 			t.calculateDesiredShards()
 		case <-t.quit:
 			return
@@ -575,15 +582,16 @@ func (s *shards) runShard(i int) {
 				return
 			}
 
-			queueLength.WithLabelValues(s.qm.queueName).Dec()
 			// Number of pending samples is limited by the fact that sendSamples (via sendSamplesWithBackoff)
 			// retries endlessly, so once we reach > 100 samples, if we can never send to the endpoint we'll
 			// stop reading from the queue (which has a size of 10).
 			pendingSamples = append(pendingSamples, sample)
+			queuePendingSamples.WithLabelValues(s.qm.queueName).Set(float64(len(pendingSamples)))
 
 			if len(pendingSamples) >= max {
 				s.sendSamples(pendingSamples[:max])
 				pendingSamples = pendingSamples[max:]
+				queuePendingSamples.WithLabelValues(s.qm.queueName).Set(float64(len(pendingSamples)))
 
 				stop()
 				timer.Reset(time.Duration(s.qm.cfg.BatchSendDeadline))
@@ -602,7 +610,10 @@ func (s *shards) sendSamples(samples []tsdb.RefSample) {
 	begin := time.Now()
 	err := s.sendSamplesWithBackoff(samples)
 	if err != nil {
-		level.Error(s.qm.logger).Log("msg", "non-recoverable error", "count", len(samples), "err", err)
+		if s.qm.logLimiter.Allow() {
+			failedSamplesTotal.WithLabelValues(s.qm.queueName).Add(float64(len(samples)))
+			level.Error(s.qm.logger).Log("msg", "non-recoverable error", "count", len(samples), "err", err)
+		}
 		return
 	}
 
@@ -632,7 +643,9 @@ func (s *shards) sendSamplesWithBackoff(samples []tsdb.RefSample) error {
 			sentBatchDuration.WithLabelValues(s.qm.queueName).Observe(time.Since(begin).Seconds())
 			if err == nil {
 				succeededSamplesTotal.WithLabelValues(s.qm.queueName).Add(float64(len(samples)))
-				s.qm.sentTimestamp.SetToCurrentTime()
+				now := time.Now()
+				s.qm.sentTimestampMetric.Set(float64(now.UnixNano()) / 1e9)
+				s.qm.sentTimestamp = now.Unix()
 				return nil
 			}
 
