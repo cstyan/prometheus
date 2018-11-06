@@ -168,8 +168,8 @@ func (c *TestStorageClient) Name() string {
 func TestSampleDelivery(t *testing.T) {
 	// Let's create an even number of send batches so we don't run into the
 	// batch timeout case.
-	// n := config.DefaultQueueConfig.Capacity * 2
-	samples, series := createTimeseries(20)
+	n := config.DefaultQueueConfig.Capacity * 2
+	samples, series := createTimeseries(n)
 
 	c := NewTestStorageClient()
 	c.expectSamples(samples[:len(samples)/2], series)

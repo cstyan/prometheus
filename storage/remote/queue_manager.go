@@ -446,7 +446,7 @@ type shards struct {
 func (t *QueueManager) newShards(numShards int) *shards {
 	queues := make([]chan tsdb.RefSample, numShards)
 	for i := 0; i < numShards; i++ {
-		queues[i] = make(chan tsdb.RefSample, 10)
+		queues[i] = make(chan tsdb.RefSample, t.cfg.Capacity)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &shards{
@@ -549,6 +549,7 @@ func (s *shards) runShard(i int) {
 	// anyways.
 	pendingSamples := []tsdb.RefSample{}
 
+	max := s.qm.cfg.MaxSamplesPerSend
 	timer := time.NewTimer(time.Duration(s.qm.cfg.BatchSendDeadline))
 	stop := func() {
 		if !timer.Stop() {
@@ -575,11 +576,14 @@ func (s *shards) runShard(i int) {
 			}
 
 			queueLength.WithLabelValues(s.qm.queueName).Dec()
+			// Number of pending samples is limited by the fact that sendSamples (via sendSamplesWithBackoff)
+			// retries endlessly, so once we reach > 100 samples, if we can never send to the endpoint we'll
+			// stop reading from the queue (which has a size of 10).
 			pendingSamples = append(pendingSamples, sample)
 
-			if len(pendingSamples) >= 100 {
-				s.sendSamples(pendingSamples[:100])
-				pendingSamples = pendingSamples[100:]
+			if len(pendingSamples) >= max {
+				s.sendSamples(pendingSamples[:max])
+				pendingSamples = pendingSamples[max:]
 
 				stop()
 				timer.Reset(time.Duration(s.qm.cfg.BatchSendDeadline))
