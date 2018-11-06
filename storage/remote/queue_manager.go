@@ -241,6 +241,8 @@ func (t *QueueManager) Append(s []tsdb.RefSample) bool {
 	}
 	t.seriesMtx.Unlock()
 
+	// We can use this copy of the shards and t.stopped to not require holding
+	// the lock during the enqueue loop, but still be able to shutdown properly.
 	t.shardsMtx.Lock()
 	shardsCopy := t.shards
 	t.shardsMtx.Unlock()
