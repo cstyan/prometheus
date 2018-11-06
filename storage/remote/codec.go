@@ -366,7 +366,7 @@ func labelsetToLabels(ls model.LabelSet) labels.Labels {
 	return l
 }
 
-func labelProtosToLabels(labelPairs []*prompb.Label) labels.Labels {
+func labelProtosToLabels(labelPairs []prompb.Label) labels.Labels {
 	result := make(labels.Labels, 0, len(labelPairs))
 	for _, l := range labelPairs {
 		result = append(result, labels.Label{
@@ -378,10 +378,10 @@ func labelProtosToLabels(labelPairs []*prompb.Label) labels.Labels {
 	return result
 }
 
-func labelsToLabelsProto(labels labels.Labels) []*prompb.Label {
-	result := make([]*prompb.Label, 0, len(labels))
+func labelsToLabelsProto(labels labels.Labels) []prompb.Label {
+	result := make([]prompb.Label, 0, len(labels))
 	for _, l := range labels {
-		result = append(result, &prompb.Label{
+		result = append(result, prompb.Label{
 			Name:  l.Name,
 			Value: l.Value,
 		})

@@ -166,7 +166,7 @@ type QueueManager struct {
 	sentTimestamp  prometheus.Gauge
 
 	seriesMtx sync.Mutex
-	series    map[uint64][]*prompb.Label
+	series    map[uint64][]prompb.Label
 
 	shardsMtx   sync.Mutex
 	shards      *shards
@@ -196,7 +196,7 @@ func NewQueueManager(logger log.Logger, walDir string, samplesIn *ewmaRate, cfg 
 		client:         client,
 		queueName:      client.Name(),
 
-		series: make(map[uint64][]*prompb.Label),
+		series: make(map[uint64][]prompb.Label),
 
 		logLimiter:  rate.NewLimiter(logRateLimit, logBurst),
 		numShards:   1,
@@ -294,7 +294,7 @@ func (t *QueueManager) Stop() {
 
 // Keep track of which series we know about for lookups when sending samples to remote.
 func (t *QueueManager) StoreSeries(series []tsdb.RefSeries) {
-	temp := make(map[uint64][]*prompb.Label)
+	temp := make(map[uint64][]prompb.Label)
 	for i := 0; i < len(series); i++ {
 		var ls = make(model.LabelSet)
 		for _, label := range series[i].Labels {
@@ -315,7 +315,7 @@ func (t *QueueManager) StoreSeries(series []tsdb.RefSeries) {
 func (t *QueueManager) ClearSeries() {
 	t.seriesMtx.Lock()
 	defer t.seriesMtx.Unlock()
-	t.series = make(map[uint64][]*prompb.Label)
+	t.series = make(map[uint64][]prompb.Label)
 }
 
 func (t *QueueManager) processExternalLabels(ls model.LabelSet) {
@@ -460,10 +460,10 @@ func (t *QueueManager) newShards(numShards int) *shards {
 	return s
 }
 
-func (t *QueueManager) buildWriteRequest(samples []tsdb.RefSample, series map[uint64][]*prompb.Label) ([]byte, error) {
+func (t *QueueManager) buildWriteRequest(samples []tsdb.RefSample, series map[uint64][]prompb.Label) ([]byte, error) {
 	t.seriesMtx.Lock()
 	req := &prompb.WriteRequest{
-		Timeseries: make([]*prompb.TimeSeries, 0, len(samples)),
+		Timeseries: make([]prompb.TimeSeries, 0, len(samples)),
 	}
 	for _, s := range samples {
 		ts := prompb.TimeSeries{
@@ -475,7 +475,7 @@ func (t *QueueManager) buildWriteRequest(samples []tsdb.RefSample, series map[ui
 				},
 			},
 		}
-		req.Timeseries = append(req.Timeseries, &ts)
+		req.Timeseries = append(req.Timeseries, ts)
 	}
 	t.seriesMtx.Unlock()
 

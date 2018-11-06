@@ -90,11 +90,11 @@ func getSeriesNameFromRef(r tsdb.RefSeries) string {
 	return ""
 }
 
-func refSeriesToLabelsProto(series []tsdb.RefSeries) map[uint64][]*prompb.Label {
-	result := make(map[uint64][]*prompb.Label)
+func refSeriesToLabelsProto(series []tsdb.RefSeries) map[uint64][]prompb.Label {
+	result := make(map[uint64][]prompb.Label)
 	for _, s := range series {
 		for _, l := range s.Labels {
-			result[s.Ref] = append(result[s.Ref], &prompb.Label{
+			result[s.Ref] = append(result[s.Ref], prompb.Label{
 				Name:  l.Name,
 				Value: l.Value,
 			})
@@ -292,10 +292,10 @@ func (t *QueueManager) queueLen() int {
 	return queueLength
 }
 
-func tsdbLabelsToLabelsProto(labels labels.Labels) []*prompb.Label {
-	result := make([]*prompb.Label, 0, len(labels))
+func tsdbLabelsToLabelsProto(labels labels.Labels) []prompb.Label {
+	result := make([]prompb.Label, 0, len(labels))
 	for _, l := range labels {
-		result = append(result, &prompb.Label{
+		result = append(result, prompb.Label{
 			Name:  l.Name,
 			Value: l.Value,
 		})
