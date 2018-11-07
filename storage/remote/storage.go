@@ -40,7 +40,7 @@ type Storage struct {
 	queuesMtx       sync.Mutex
 	queues          map[*QueueManager]struct{}
 	samplesIn       *ewmaRate
-	samplesInMetric prometheus.Counter
+	samplesInMetric prometheus.Gauge
 
 	// For reads
 	queryables             []storage.Queryable
@@ -61,12 +61,13 @@ func NewStorage(l log.Logger, reg prometheus.Registerer, stCallback startTimeCal
 		walDir:                 walDir,
 		queues:                 make(map[*QueueManager]struct{}),
 		samplesIn:              newEWMARate(ewmaWeight, shardUpdateDuration),
-		samplesInMetric: prometheus.NewCounter(prometheus.CounterOpts{
+		samplesInMetric: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "prometheus_remote_storage_samples_in_total",
 			Help: "Samples in to remote storage, compare to samples out for queue managers.",
 		}),
 	}
 	reg.MustRegister(s.samplesInMetric)
+	s.samplesInMetric.Set(0)
 	return s
 }
 

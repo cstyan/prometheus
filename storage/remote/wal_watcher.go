@@ -25,20 +25,35 @@ import (
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
 	"github.com/pkg/errors"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/tsdb"
 	"github.com/prometheus/tsdb/wal"
 	fsnotify "gopkg.in/fsnotify/fsnotify.v1"
 )
 
 var (
-	segmentRegex    = regexp.MustCompile(`\d{8}`)
-	checkpointRegex = regexp.MustCompile(`checkpoint.\d{6}`)
+	segmentRegex           = regexp.MustCompile(`\d{8}`)
+	checkpointRegex        = regexp.MustCompile(`checkpoint.\d{6}`)
+	watcherEventsProcessed = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: "prometheus",
+			Subsystem: "wal_watcher",
+			Name:      "watcher_events_processed",
+			Help:      "Number of fsnotify events processed by the WAL Watcher.",
+		},
+		[]string{queue},
+	)
 )
+
+func init() {
+	prometheus.MustRegister(watcherEventsProcessed)
+}
 
 type WriteTo interface {
 	Append([]tsdb.RefSample) bool
 	StoreSeries([]tsdb.RefSeries)
 	ClearSeries()
+	Name() string
 }
 
 // WALWatcher watches the TSDB WAL for a given WriteTo.
@@ -76,7 +91,6 @@ func (w *WALWatcher) Start() {
 }
 
 func (w *WALWatcher) Stop() {
-	w.logger.Log("wal watcher stopped called")
 	close(w.quit)
 	return
 }
@@ -159,15 +173,16 @@ func (w *WALWatcher) watch(segment *wal.Segment) error {
 	for {
 		select {
 		case <-w.quit:
-			level.Info(w.logger).Log("quitting WAL watcher watch loop")
+			level.Info(w.logger).Log("msg", "quitting WAL watcher watch loop")
 			return errors.New("quit channel")
 		// TODO: callum, handle maintaining the WAL pointer somehow across apply configs?
 		case event, ok := <-w.watcher.Events:
+			watcherEventsProcessed.WithLabelValues(w.writer.Name()).Inc()
 			_, fileName := filepath.Split(event.Name)
 
 			// TODO: callum, in what case do we get !ok?
 			if !ok {
-				level.Info(w.logger).Log("exiting WAL watcher watch loop")
+				level.Info(w.logger).Log("msg", "exiting WAL watcher watch loop")
 				return errors.New("watcher events channel was closed")
 			}
 			if event.Op&fsnotify.Write == fsnotify.Write {
@@ -189,7 +204,7 @@ func (w *WALWatcher) watch(segment *wal.Segment) error {
 					err := w.readCheckpoint(path.Join(w.walDir, fileName))
 					if err != nil {
 						level.Error(w.logger).Log("err", err)
-						level.Info(w.logger).Log("exiting WAL watcher watch loop")
+						level.Info(w.logger).Log("msg", "exiting WAL watcher watch loop")
 						return err
 					}
 				}
@@ -198,7 +213,7 @@ func (w *WALWatcher) watch(segment *wal.Segment) error {
 			// TODO: callum, are these errors recoverable?
 			level.Error(w.logger).Log("err", err)
 			if !ok {
-				level.Info(w.logger).Log("exiting WAL watcher watch loop")
+				level.Info(w.logger).Log("msg", "exiting WAL watcher watch loop")
 				return errors.New("watcher errors channel was closed")
 			}
 		}

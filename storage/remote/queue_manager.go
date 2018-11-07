@@ -293,6 +293,10 @@ func (t *QueueManager) Stop() {
 	level.Info(t.logger).Log("msg", "Remote storage stopped.")
 }
 
+func (t *QueueManager) Name() string {
+	return t.queueName
+}
+
 // Keep track of which series we know about for lookups when sending samples to remote.
 func (t *QueueManager) StoreSeries(series []tsdb.RefSeries) {
 	temp := make(map[uint64][]prompb.Label)
