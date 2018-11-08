@@ -16,6 +16,7 @@ package remote
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"sync"
 	"sync/atomic"
@@ -100,14 +101,14 @@ var (
 		},
 		[]string{queue},
 	)
-	queuePendingSamples = prometheus.NewGaugeVec(
+	shardPendingSamples = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: namespace,
 			Subsystem: subsystem,
 			Name:      "pending_samples",
 			Help:      "The number of samples pending in the queues shards to be sent to the remote storage.",
 		},
-		[]string{queue},
+		[]string{queue, "shard"},
 	)
 	shardCapacity = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -115,6 +116,24 @@ var (
 			Subsystem: subsystem,
 			Name:      "shard_capacity",
 			Help:      "The capacity of each shard of the queue used for parallel sending to the remote storage.",
+		},
+		[]string{queue},
+	)
+	watcherLastSuccessfulAppend = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: namespace,
+			Subsystem: subsystem,
+			Name:      "watcher_last_append",
+			Help:      "The last time the WAL watcher for the queue sucessfully appended samples to the queue.",
+		},
+		[]string{queue},
+	)
+	watcherCurrentSegment = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: namespace,
+			Subsystem: subsystem,
+			Name:      "watcher_current_segment",
+			Help:      "The number of the current segment file the WAL watcher expects to process events for.",
 		},
 		[]string{queue},
 	)
@@ -135,8 +154,10 @@ func init() {
 	prometheus.MustRegister(droppedSamplesTotal)
 	prometheus.MustRegister(sentBatchDuration)
 	prometheus.MustRegister(queueSentTimestamp)
-	prometheus.MustRegister(queuePendingSamples)
+	prometheus.MustRegister(shardPendingSamples)
 	prometheus.MustRegister(shardCapacity)
+	prometheus.MustRegister(watcherLastSuccessfulAppend)
+	prometheus.MustRegister(watcherCurrentSegment)
 	prometheus.MustRegister(numShards)
 }
 
@@ -245,11 +266,11 @@ func (t *QueueManager) Append(s []tsdb.RefSample) bool {
 	// We can use this copy of the shards and t.stopped to not require holding
 	// the lock during the enqueue loop, but still be able to shutdown properly.
 	t.shardsMtx.Lock()
-	shardsCopy := t.shards
-	t.shardsMtx.Unlock()
+	// shardsCopy := t.shards
+	defer t.shardsMtx.Unlock()
 
 	for _, sample := range tempSamples[:len(tempSamples)] {
-		if err := shardsCopy.enqueue(sample); err != nil {
+		if err := t.shards.enqueue(sample); err != nil {
 			level.Error(t.logger).Log("err", err)
 			return false
 		}
@@ -561,6 +582,7 @@ func (s *shards) runShard(i int) {
 	pendingSamples := []tsdb.RefSample{}
 
 	max := s.qm.cfg.MaxSamplesPerSend
+	shardNum := fmt.Sprintf("%d", i)
 	timer := time.NewTimer(time.Duration(s.qm.cfg.BatchSendDeadline))
 	stop := func() {
 		if !timer.Stop() {
@@ -590,20 +612,23 @@ func (s *shards) runShard(i int) {
 			// retries endlessly, so once we reach > 100 samples, if we can never send to the endpoint we'll
 			// stop reading from the queue (which has a size of 10).
 			pendingSamples = append(pendingSamples, sample)
-			queuePendingSamples.WithLabelValues(s.qm.queueName).Set(float64(len(pendingSamples)))
+			shardPendingSamples.WithLabelValues(s.qm.queueName, shardNum).Set(float64(len(pendingSamples)))
 
 			if len(pendingSamples) >= max {
+				s.qm.logger.Log("msg", "enough samples to send, sending now", "shard", shardNum, "samples", len(pendingSamples))
 				s.sendSamples(pendingSamples[:max])
 				pendingSamples = pendingSamples[max:]
-				queuePendingSamples.WithLabelValues(s.qm.queueName).Set(float64(len(pendingSamples)))
+				shardPendingSamples.WithLabelValues(s.qm.queueName, shardNum).Set(float64(len(pendingSamples)))
 
 				stop()
 				timer.Reset(time.Duration(s.qm.cfg.BatchSendDeadline))
 			}
 		case <-timer.C:
 			if len(pendingSamples) > 0 {
+				s.qm.logger.Log("msg", "timer countdown reached, sending samples", "shard", shardNum, "samples", len(pendingSamples))
 				s.sendSamples(pendingSamples)
 				pendingSamples = pendingSamples[:0]
+				shardPendingSamples.WithLabelValues(s.qm.queueName, shardNum).Set(float64(len(pendingSamples)))
 			}
 			timer.Reset(time.Duration(s.qm.cfg.BatchSendDeadline))
 		}
@@ -611,6 +636,7 @@ func (s *shards) runShard(i int) {
 }
 
 func (s *shards) sendSamples(samples []tsdb.RefSample) {
+	defer s.qm.logger.Log("msg", "sent samples")
 	begin := time.Now()
 	err := s.sendSamplesWithBackoff(samples)
 	if err != nil {

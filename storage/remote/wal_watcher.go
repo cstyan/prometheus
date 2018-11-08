@@ -272,6 +272,7 @@ func (w *WALWatcher) runWatcher() {
 
 	for {
 		level.Info(w.logger).Log("msg", "watching segment", "segment", w.currentSegment)
+		watcherCurrentSegment.WithLabelValues(w.writer.Name()).Set(float64(w.currentSegment))
 		// On start, after reading the existing WAL for series records, we have a pointer to what is the latest segment.
 		// On subsequent calls to this function, currentSegment will have been incremented and we should open that segment.
 		err := w.watch(segment)
@@ -290,18 +291,9 @@ func (w *WALWatcher) runWatcher() {
 }
 
 // Blocks  until the sample is sent to all remote write endpoints
-func (w *WALWatcher) forwardSamples(s []tsdb.RefSample) error {
-	for {
-		select {
-		case <-w.quit:
-			return fmt.Errorf("exit when attempting to forward samples")
-		default:
-			ok := w.writer.Append(s)
-			if ok {
-				return nil
-			}
-		}
-	}
+func (w *WALWatcher) forwardSamples(s []tsdb.RefSample) {
+	w.writer.Append(s)
+	watcherLastSuccessfulAppend.WithLabelValues(w.writer.Name()).SetToCurrentTime()
 }
 
 func (w *WALWatcher) decodeSegment(segment *wal.Segment) {
@@ -331,11 +323,7 @@ func (w *WALWatcher) decodeSegment(segment *wal.Segment) {
 				level.Error(log.With(w.logger)).Log("err", err)
 				break
 			}
-			err = w.forwardSamples(samples)
-			if err != nil {
-				return
-			}
-
+			w.forwardSamples(samples)
 			nSamples += len(samples)
 		case tsdb.RecordTombstones:
 			continue
