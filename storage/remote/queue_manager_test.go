@@ -67,10 +67,10 @@ func TestSampleDelivery(t *testing.T) {
 	m.Start()
 	m.Append(samples[:len(samples)/2])
 	defer m.Stop()
-
 	c.waitForExpectedSamples(t)
-	m.Append(samples[len(samples)/2:])
+
 	c.expectSamples(samples[len(samples)/2:], series)
+	m.Append(samples[len(samples)/2:])
 	c.waitForExpectedSamples(t)
 }
 
@@ -199,7 +199,7 @@ func TestSeriesReset(t *testing.T) {
 func TestReshard(t *testing.T) {
 	size := 10 // Make bigger to find more races.
 	n := config.DefaultQueueConfig.Capacity * size
-	samples, series := createTimeseries(n, n)
+	samples, series := createTimeseries(1, n)
 
 	c := NewTestStorageClient()
 	c.expectSamples(samples, series)
@@ -328,21 +328,22 @@ func TestCalculateDesiredsShards(t *testing.T) {
 }
 
 func createTimeseries(numSamples, numSeries int) ([]record.RefSample, []record.RefSeries) {
-	samples := make([]record.RefSample, 0, numSamples)
+	samples := make([]record.RefSample, 0, numSamples*numSeries)
 	series := make([]record.RefSeries, 0, numSeries)
 	for i := 0; i < numSeries; i++ {
+		name := fmt.Sprintf("test_metric_%d", i)
 		for j := 0; j < numSamples; j++ {
-			name := fmt.Sprintf("test_metric_%d", i)
 			samples = append(samples, record.RefSample{
 				Ref: uint64(i),
 				T:   int64(j),
 				V:   float64(i),
 			})
-			series = append(series, record.RefSeries{
-				Ref:    uint64(i),
-				Labels: labels.Labels{{Name: "__name__", Value: name}},
-			})
+
 		}
+		series = append(series, record.RefSeries{
+			Ref:    uint64(i),
+			Labels: labels.Labels{{Name: "__name__", Value: name}},
+		})
 	}
 	return samples, series
 }
@@ -382,7 +383,6 @@ func (c *TestStorageClient) expectSamples(ss []record.RefSample, series []record
 
 	c.expectedSamples = map[string][]prompb.Sample{}
 	c.receivedSamples = map[string][]prompb.Sample{}
-
 	for _, s := range ss {
 		seriesName := getSeriesNameFromRef(series[s.Ref])
 		c.expectedSamples[seriesName] = append(c.expectedSamples[seriesName], prompb.Sample{
@@ -402,7 +402,7 @@ func (c *TestStorageClient) waitForExpectedSamples(tb testing.TB) {
 	defer c.mtx.Unlock()
 	for ts, expectedSamples := range c.expectedSamples {
 		if !reflect.DeepEqual(expectedSamples, c.receivedSamples[ts]) {
-			tb.Fatalf("%s: Expected %v, got %v", ts, expectedSamples, c.receivedSamples[ts])
+			tb.Fatalf("%s: Expected %v, got %v", ts, c.expectedSamples, c.receivedSamples[ts])
 		}
 	}
 }
