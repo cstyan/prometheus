@@ -1107,6 +1107,14 @@ func (a *initAppender) AppendExemplar(ref uint64, l labels.Labels, e exemplar.Ex
 	return a.app.AppendExemplar(ref, l, e)
 }
 
+func (a *initAppender) AddExemplar(l labels.Labels, t int64, e exemplar.Exemplar) error {
+	return nil
+}
+
+func (a *initAppender) AddExemplarFast(ref uint64, t int64, v float64, e exemplar.Exemplar) error {
+	return nil
+}
+
 func (a *initAppender) Commit() error {
 	if a.app == nil {
 		return nil
@@ -1358,7 +1366,28 @@ func (a *headAppender) log() error {
 			return errors.Wrap(err, "log samples")
 		}
 	}
+	if len(a.exemplars) > 0 {
+		rec = enc.Exemplars(exemplarsForEncoding(a.exemplars), buf)
+		buf = rec[:0]
+
+		if err := a.head.wal.Log(rec); err != nil {
+			return errors.Wrap(err, "log exemplars")
+		}
+	}
 	return nil
+}
+
+func exemplarsForEncoding(es []exemplarWithSeriesRef) []record.RefExemplar {
+	ret := make([]record.RefExemplar, len(es))
+	for _, e := range es {
+		ret = append(ret, record.RefExemplar{
+			Ref:    e.ref,
+			T:      e.exemplar.Ts,
+			V:      e.exemplar.Value,
+			Labels: e.exemplar.Labels,
+		})
+	}
+	return ret
 }
 
 func (a *headAppender) Commit() (err error) {
@@ -1433,6 +1462,7 @@ func (a *headAppender) Rollback() (err error) {
 		series.Unlock()
 	}
 	a.head.putAppendBuffer(a.samples)
+	a.head.putExemplarBuffer(a.exemplars)
 	a.samples = nil
 
 	// Series are created in the head memory regardless of rollback. Thus we have

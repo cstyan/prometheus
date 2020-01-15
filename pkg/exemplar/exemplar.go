@@ -13,14 +13,38 @@
 
 package exemplar
 
-import "github.com/prometheus/prometheus/pkg/labels"
+import (
+	"github.com/prometheus/prometheus/pkg/labels"
+)
 
 // Exemplar is additional information associated with a time series.
 type Exemplar struct {
-	Labels labels.Labels
-	Value  float64
-	HasTs  bool
-	Ts     int64
+	Labels labels.Labels `json:"labels"`
+	Value  float64       `json:"value"`
+	Ts     int64         `json:"timestamp"`
+	HasTs  bool          `json:"hasTimestamp"`
+}
+
+// ExemplarScrapeTimestamp is an exemplar with it's scrape timestamp.
+//nolint: golint
+type ExemplarScrapeTimestamp struct {
+	Exemplar        Exemplar
+	ScrapeTimestamp int64
+}
+
+// EqualsWithoutTimestamp compares if the exemplar e is the same as e2 but ignores
+// the Ts field of the exemplar. Useful when determining if exemplars are duplicates
+// from subsequent scrapes.
+func (e Exemplar) EqualsWithoutTimestamp(e2 Exemplar) bool {
+	if e.Labels.String() != e2.Labels.String() {
+		return false
+	}
+
+	if e.Value != e2.Value {
+		return false
+	}
+
+	return true
 }
 
 type QueryResult struct {

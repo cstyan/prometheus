@@ -113,6 +113,7 @@ type flagConfig struct {
 	queryTimeout        model.Duration
 	queryConcurrency    int
 	queryMaxSamples     int
+	ExemplarsLimit      int
 	RemoteFlushDeadline model.Duration
 
 	featureList []string
@@ -829,6 +830,7 @@ func main() {
 
 				startTimeMargin := int64(2 * time.Duration(cfg.tsdb.MinBlockDuration).Seconds() * 1000)
 				localStorage.Set(db, startTimeMargin)
+				// todo: which context to pass? (callum)
 				close(dbOpen)
 				<-cancel
 				return nil
@@ -1134,6 +1136,13 @@ func (n notReadyAppender) Append(ref uint64, l labels.Labels, t int64, v float64
 
 func (n notReadyAppender) AppendExemplar(ref uint64, l labels.Labels, e exemplar.Exemplar) (uint64, error) {
 	return 0, tsdb.ErrNotReady
+}
+
+func (n notReadyAppender) AddExemplar(l labels.Labels, t int64, e exemplar.Exemplar) error {
+	return tsdb.ErrNotReady
+}
+func (n notReadyAppender) AddExemplarFast(ref uint64, t int64, v float64, e exemplar.Exemplar) error {
+	return tsdb.ErrNotReady
 }
 
 func (n notReadyAppender) Commit() error { return tsdb.ErrNotReady }

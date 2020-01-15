@@ -78,6 +78,7 @@ func DefaultOptions() *Options {
 		WALCompression:            false,
 		StripeSize:                DefaultStripeSize,
 		HeadChunksWriteBufferSize: chunks.DefaultWriteBufferSize,
+		MaxExemplars:              0,
 	}
 }
 
@@ -786,6 +787,10 @@ func (db *DB) run() {
 // Appender opens a new appender against the database.
 func (db *DB) Appender(ctx context.Context) storage.Appender {
 	return dbAppender{db: db, Appender: db.head.Appender(ctx)}
+}
+
+func (db *DB) ExemplarAppender(ctx context.Context) storage.ExemplarAppender {
+	return db.head.Appender(ctx)
 }
 
 // dbAppender wraps the DB's head appender and triggers compactions on commit

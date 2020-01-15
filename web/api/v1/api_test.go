@@ -304,6 +304,9 @@ func TestEndpoints(t *testing.T) {
 			test_metric4{foo="bar", dup="1"} 1+0x100
 			test_metric4{foo="boo", dup="1"} 1+0x100
 			test_metric4{foo="boo"} 1+0x100
+			test_metric3{foo="qwerty", cluster="abc"} 1+0x100
+			test_metric4{foo="asdf", cluster="abc"} 1+0x97
+			test_metric4{foo="qwerty", cluster="abc"} 1+0x95
 	`)
 
 	start := time.Unix(0, 0)
@@ -1608,8 +1611,10 @@ func testEndpoints(t *testing.T, api *API, tr *testTargetRetriever, es storage.E
 					"name": "foo",
 				},
 				response: []string{
+					"asdf",
 					"bar",
 					"boo",
+					"qwerty",
 				},
 			},
 			// Bad name parameter.
@@ -1643,8 +1648,10 @@ func testEndpoints(t *testing.T, api *API, tr *testTargetRetriever, es storage.E
 					"end":   []string{"100"},
 				},
 				response: []string{
+					"asdf",
 					"bar",
 					"boo",
+					"qwerty",
 				},
 			},
 			// Start before LabelValues, end within LabelValues.
@@ -1658,8 +1665,10 @@ func testEndpoints(t *testing.T, api *API, tr *testTargetRetriever, es storage.E
 					"end":   []string{"3"},
 				},
 				response: []string{
+					"asdf",
 					"bar",
 					"boo",
+					"qwerty",
 				},
 			},
 			// Start before LabelValues starts, end after LabelValues ends.
@@ -1673,8 +1682,10 @@ func testEndpoints(t *testing.T, api *API, tr *testTargetRetriever, es storage.E
 					"end":   []string{"1970-02-01T00:02:03Z"},
 				},
 				response: []string{
+					"asdf",
 					"bar",
 					"boo",
+					"qwerty",
 				},
 			},
 			// Start with bad data, end within LabelValues.
@@ -1700,8 +1711,10 @@ func testEndpoints(t *testing.T, api *API, tr *testTargetRetriever, es storage.E
 					"end":   []string{"100000000"},
 				},
 				response: []string{
+					"asdf",
 					"bar",
 					"boo",
+					"qwerty",
 				},
 			},
 			// Start and end after LabelValues ends.
@@ -1726,8 +1739,10 @@ func testEndpoints(t *testing.T, api *API, tr *testTargetRetriever, es storage.E
 					"start": []string{"2"},
 				},
 				response: []string{
+					"asdf",
 					"bar",
 					"boo",
+					"qwerty",
 				},
 			},
 			// Only provide end within LabelValues, don't provide a start time.
@@ -1740,8 +1755,10 @@ func testEndpoints(t *testing.T, api *API, tr *testTargetRetriever, es storage.E
 					"end": []string{"100"},
 				},
 				response: []string{
+					"asdf",
 					"bar",
 					"boo",
+					"qwerty",
 				},
 			},
 			// Label values with bad matchers.
@@ -1839,7 +1856,7 @@ func testEndpoints(t *testing.T, api *API, tr *testTargetRetriever, es storage.E
 			// Label names.
 			{
 				endpoint: api.labelNames,
-				response: []string{"__name__", "dup", "foo"},
+				response: []string{"__name__", "cluster", "dup", "foo"},
 			},
 			// Start and end before Label names starts.
 			{
@@ -1857,7 +1874,7 @@ func testEndpoints(t *testing.T, api *API, tr *testTargetRetriever, es storage.E
 					"start": []string{"1"},
 					"end":   []string{"100"},
 				},
-				response: []string{"__name__", "dup", "foo"},
+				response: []string{"__name__", "cluster", "dup", "foo"},
 			},
 			// Start before Label names, end within Label names.
 			{
@@ -1866,7 +1883,7 @@ func testEndpoints(t *testing.T, api *API, tr *testTargetRetriever, es storage.E
 					"start": []string{"-1"},
 					"end":   []string{"10"},
 				},
-				response: []string{"__name__", "dup", "foo"},
+				response: []string{"__name__", "cluster", "dup", "foo"},
 			},
 
 			// Start before Label names starts, end after Label names ends.
@@ -1876,7 +1893,7 @@ func testEndpoints(t *testing.T, api *API, tr *testTargetRetriever, es storage.E
 					"start": []string{"-1"},
 					"end":   []string{"100000"},
 				},
-				response: []string{"__name__", "dup", "foo"},
+				response: []string{"__name__", "cluster", "dup", "foo"},
 			},
 			// Start with bad data for Label names, end within Label names.
 			{
@@ -1894,7 +1911,7 @@ func testEndpoints(t *testing.T, api *API, tr *testTargetRetriever, es storage.E
 					"start": []string{"1"},
 					"end":   []string{"1000000006"},
 				},
-				response: []string{"__name__", "dup", "foo"},
+				response: []string{"__name__", "cluster", "dup", "foo"},
 			},
 			// Start and end after Label names ends.
 			{
@@ -1911,7 +1928,7 @@ func testEndpoints(t *testing.T, api *API, tr *testTargetRetriever, es storage.E
 				query: url.Values{
 					"start": []string{"4"},
 				},
-				response: []string{"__name__", "dup", "foo"},
+				response: []string{"__name__", "cluster", "dup", "foo"},
 			},
 			// Only provide End within Label names, don't provide a start time.
 			{
@@ -1919,7 +1936,7 @@ func testEndpoints(t *testing.T, api *API, tr *testTargetRetriever, es storage.E
 				query: url.Values{
 					"end": []string{"20"},
 				},
-				response: []string{"__name__", "dup", "foo"},
+				response: []string{"__name__", "cluster", "dup", "foo"},
 			},
 			// Label names with bad matchers.
 			{
@@ -1954,7 +1971,7 @@ func testEndpoints(t *testing.T, api *API, tr *testTargetRetriever, es storage.E
 				query: url.Values{
 					"match[]": []string{`test_metric3`},
 				},
-				response: []string{"__name__", "dup", "foo"},
+				response: []string{"__name__", "cluster", "dup", "foo"},
 			},
 			// Label names with matcher using label filter.
 			// There is no matching series.

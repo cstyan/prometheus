@@ -227,6 +227,14 @@ func (t *timestampTracker) AppendExemplar(_ uint64, _ labels.Labels, _ exemplar.
 	return 0, nil
 }
 
+func (t *timestampTracker) AddExemplar(_ labels.Labels, _ int64, _ exemplar.Exemplar) error {
+	return nil
+}
+
+func (t *timestampTracker) AddExemplarFast(_ uint64, _ int64, _ float64, _ exemplar.Exemplar) error {
+	return nil
+}
+
 // Commit implements storage.Appender.
 func (t *timestampTracker) Commit() error {
 	t.writeStorage.samplesIn.incr(t.samples)

@@ -483,12 +483,15 @@ func TestScrapePoolAppender(t *testing.T) {
 }
 
 func TestScrapePoolRaces(t *testing.T) {
+	var (
+		app = &nopAppendable{}
+	)
 	interval, _ := model.ParseDuration("500ms")
 	timeout, _ := model.ParseDuration("1s")
 	newConfig := func() *config.ScrapeConfig {
 		return &config.ScrapeConfig{ScrapeInterval: interval, ScrapeTimeout: timeout}
 	}
-	sp, _ := newScrapePool(newConfig(), &nopAppendable{}, 0, nil)
+	sp, _ := newScrapePool(newConfig(), app, 0, nil)
 	tgts := []*targetgroup.Group{
 		{
 			Targets: []model.LabelSet{
@@ -2333,6 +2336,7 @@ func TestReuseCacheRace(t *testing.T) {
 			ScrapeInterval: model.Duration(5 * time.Second),
 			MetricsPath:    "/metrics",
 		}
+
 		sp, _ = newScrapePool(cfg, app, 0, nil)
 		t1    = &Target{
 			discoveredLabels: labels.Labels{
