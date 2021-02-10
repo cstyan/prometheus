@@ -1068,6 +1068,7 @@ func (h *RangeHead) String() string {
 // upon the first sample it receives.
 type initAppender struct {
 	app  storage.Appender
+	eApp storage.ExemplarAppender
 	head *Head
 }
 
@@ -1090,21 +1091,21 @@ func (a *initAppender) AddFast(ref uint64, t int64, v float64) error {
 
 func (a *initAppender) AddExemplar(l labels.Labels, e exemplar.Exemplar) error {
 	if a.app != nil {
-		return a.app.AddExemplar(l, e)
+		return a.eApp.AddExemplar(l, e)
 	}
 	// I don't think we should ever reach here given we would call Add before AddExemplar
 	// and we probably want to always base head/WAL min time on sample times.
 	a.head.initTime(e.Ts)
 	a.app = a.head.appender()
 
-	return a.app.AddExemplar(l, e)
+	return a.eApp.AddExemplar(l, e)
 }
 
 func (a *initAppender) AddExemplarFast(ref uint64, e exemplar.Exemplar) error {
-	if a.app == nil {
+	if a.eApp == nil {
 		return storage.ErrNotFound
 	}
-	return a.app.AddExemplarFast(ref, e)
+	return a.eApp.AddExemplarFast(ref, e)
 }
 
 func (a *initAppender) Commit() error {
@@ -1123,6 +1124,20 @@ func (a *initAppender) Rollback() error {
 
 // Appender returns a new Appender on the database.
 func (h *Head) Appender(_ context.Context) storage.Appender {
+	h.metrics.activeAppenders.Inc()
+
+	// The head cache might not have a starting point yet. The init appender
+	// picks up the first appended timestamp as the base.
+	if h.MinTime() == math.MaxInt64 {
+		return &initAppender{
+			head: h,
+		}
+	}
+	return h.appender()
+}
+
+// ExemplarAppender returns a new ExemplarAppender on the Head's exemplar storage.
+func (h *Head) ExemplarAppender(_ context.Context) storage.ExemplarAppender {
 	h.metrics.activeAppenders.Inc()
 
 	// The head cache might not have a starting point yet. The init appender

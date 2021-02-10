@@ -27,6 +27,10 @@ func (a nopAppendable) Appender(_ context.Context) storage.Appender {
 	return nopAppender{}
 }
 
+func (a nopAppendable) ExemplarAppender() storage.ExemplarAppender {
+	return nopAppender{}
+}
+
 type nopAppender struct{}
 
 func (a nopAppender) Add(labels.Labels, int64, float64) (uint64, error)  { return 0, nil }
@@ -46,6 +50,7 @@ type sample struct {
 // It can be used as its zero value or be backed by another appender it writes samples through.
 type collectResultAppender struct {
 	next             storage.Appender
+	exemplarNext     storage.ExemplarAppender
 	result           []sample
 	pendingResult    []sample
 	rolledbackResult []sample
@@ -99,8 +104,7 @@ func (a *collectResultAppender) AddExemplar(l labels.Labels, e exemplar.Exemplar
 	if a.next == nil {
 		return nil
 	}
-
-	return a.next.AddExemplar(l, e)
+	return a.exemplarNext.AddExemplar(l, e)
 }
 
 func (a *collectResultAppender) AddExemplarFast(ref uint64, e exemplar.Exemplar) error {
@@ -109,7 +113,7 @@ func (a *collectResultAppender) AddExemplarFast(ref uint64, e exemplar.Exemplar)
 		return nil
 	}
 
-	return a.next.AddExemplarFast(ref, e)
+	return a.exemplarNext.AddExemplarFast(ref, e)
 }
 
 func (a *collectResultAppender) Commit() error {

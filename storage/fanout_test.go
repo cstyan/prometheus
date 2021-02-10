@@ -71,7 +71,7 @@ func TestFanout_SelectSorted(t *testing.T) {
 	err = app3.Commit()
 	require.NoError(t, err)
 
-	fanoutStorage := storage.NewFanout(nil, priStorage, remoteStorage1, remoteStorage2)
+	fanoutStorage := storage.NewFanout(nil, priStorage, nil, remoteStorage1, remoteStorage2)
 
 	t.Run("querier", func(t *testing.T) {
 		querier, err := fanoutStorage.Querier(context.Background(), 0, 8000)
@@ -153,7 +153,7 @@ func TestFanoutErrors(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		fanoutStorage := storage.NewFanout(nil, tc.primary, tc.secondary)
+		fanoutStorage := storage.NewFanout(nil, tc.primary, tc.primary.(storage.ExemplarAppendable), tc.secondary)
 
 		t.Run("samples", func(t *testing.T) {
 			querier, err := fanoutStorage.Querier(context.Background(), 0, 8000)
@@ -223,6 +223,7 @@ func (errStorage) ChunkQuerier(_ context.Context, _, _ int64) (storage.ChunkQuer
 	return errChunkQuerier{}, nil
 }
 func (errStorage) Appender(_ context.Context) storage.Appender { return nil }
+func (errStorage) ExemplarAppender() storage.ExemplarAppender  { return nil }
 func (errStorage) StartTime() (int64, error)                   { return 0, nil }
 func (errStorage) Close() error                                { return nil }
 

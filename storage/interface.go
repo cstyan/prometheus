@@ -174,10 +174,6 @@ type Appender interface {
 	// faster than adding a sample by providing its full label set.
 	AddFast(ref uint64, t int64, v float64) error
 
-	AddExemplar(l labels.Labels, e exemplar.Exemplar) error
-
-	AddExemplarFast(ref uint64, e exemplar.Exemplar) error
-
 	// Commit submits the collected samples and purges the batch. If Commit
 	// returns a non-nil error, it also rolls back all modifications made in
 	// the appender so far, as Rollback would do. In any case, an Appender
@@ -194,6 +190,9 @@ type Appender interface {
 type ExemplarAppender interface {
 	// Add adds an exemplar to the for the given series labels.
 	AddExemplar(l labels.Labels, e exemplar.Exemplar) error
+
+	// Add adds an exemplar to the for the given series reference ID.
+	AddExemplarFast(ref uint64, e exemplar.Exemplar) error
 }
 
 // SeriesSet contains a set of series.

@@ -190,9 +190,10 @@ func init() {
 
 // scrapePool manages scrapes for sets of targets.
 type scrapePool struct {
-	appendable storage.Appendable
-	logger     log.Logger
-	cancel     context.CancelFunc
+	appendable         storage.Appendable
+	exemplarAppendable storage.ExemplarAppendable
+	logger             log.Logger
+	cancel             context.CancelFunc
 
 	// mtx must not be taken after targetMtx.
 	mtx            sync.Mutex
@@ -225,11 +226,13 @@ const maxAheadTime = 10 * time.Minute
 
 type labelsMutator func(labels.Labels) labels.Labels
 
-func newScrapePool(cfg *config.ScrapeConfig, app storage.Appendable, jitterSeed uint64, logger log.Logger) (*scrapePool, error) {
+func newScrapePool(cfg *config.ScrapeConfig, app storage.Appendable, eApp storage.ExemplarAppendable, jitterSeed uint64, logger log.Logger) (*scrapePool, error) {
 	targetScrapePools.Inc()
 	if logger == nil {
 		logger = log.NewNopLogger()
 	}
+
+	fmt.Println("new scrape pool eApp: ", eApp)
 
 	client, err := config_util.NewClientFromConfig(cfg.HTTPClientConfig, cfg.JobName, false, false)
 	if err != nil {
@@ -241,14 +244,17 @@ func newScrapePool(cfg *config.ScrapeConfig, app storage.Appendable, jitterSeed 
 
 	ctx, cancel := context.WithCancel(context.Background())
 	sp := &scrapePool{
-		cancel:        cancel,
-		appendable:    app,
-		config:        cfg,
-		client:        client,
-		activeTargets: map[uint64]*Target{},
-		loops:         map[uint64]loop{},
-		logger:        logger,
+		cancel:             cancel,
+		appendable:         app,
+		exemplarAppendable: eApp,
+		config:             cfg,
+		client:             client,
+		activeTargets:      map[uint64]*Target{},
+		loops:              map[uint64]loop{},
+		logger:             logger,
 	}
+
+	fmt.Println("new scrape pool, eapp: ", eApp)
 	sp.newLoop = func(opts scrapeLoopOptions) loop {
 		// Update the targets retrieval function for metadata to a new scrape cache.
 		cache := opts.cache
@@ -267,6 +273,7 @@ func newScrapePool(cfg *config.ScrapeConfig, app storage.Appendable, jitterSeed 
 			},
 			func(l labels.Labels) labels.Labels { return mutateReportSampleLabels(l, opts.target) },
 			func(ctx context.Context) storage.Appender { return appender(app.Appender(ctx), opts.limit) },
+			eApp.ExemplarAppender(),
 			cache,
 			jitterSeed,
 			opts.honorTimestamps,
@@ -702,6 +709,7 @@ type scrapeLoop struct {
 	forcedErrMtx    sync.Mutex
 
 	appender            func(ctx context.Context) storage.Appender
+	eAppender           storage.ExemplarAppender
 	sampleMutator       labelsMutator
 	reportSampleMutator labelsMutator
 
@@ -964,6 +972,7 @@ func newScrapeLoop(ctx context.Context,
 	sampleMutator labelsMutator,
 	reportSampleMutator labelsMutator,
 	appender func(ctx context.Context) storage.Appender,
+	eAppender storage.ExemplarAppender,
 	cache *scrapeCache,
 	jitterSeed uint64,
 	honorTimestamps bool,
@@ -982,6 +991,7 @@ func newScrapeLoop(ctx context.Context,
 		buffers:             buffers,
 		cache:               cache,
 		appender:            appender,
+		eAppender:           eAppender,
 		sampleMutator:       sampleMutator,
 		reportSampleMutator: reportSampleMutator,
 		stopped:             make(chan struct{}),
@@ -1099,7 +1109,7 @@ func (sl *scrapeLoop) scrapeAndReport(interval, timeout time.Duration, last, app
 	if forcedErr := sl.getForcedError(); forcedErr != nil {
 		scrapeErr = forcedErr
 		// Add stale markers.
-		if _, _, _, err := sl.append(app, []byte{}, "", appendTime); err != nil {
+		if _, _, _, err := sl.append(app, sl.eAppender, []byte{}, "", appendTime); err != nil {
 			app.Rollback()
 			app = sl.appender(sl.parentCtx)
 			level.Warn(sl.l).Log("msg", "Append failed", "err", err)
@@ -1133,14 +1143,14 @@ func (sl *scrapeLoop) scrapeAndReport(interval, timeout time.Duration, last, app
 
 	// A failed scrape is the same as an empty scrape,
 	// we still call sl.append to trigger stale markers.
-	total, added, seriesAdded, appErr = sl.append(app, b, contentType, appendTime)
+	total, added, seriesAdded, appErr = sl.append(app, sl.eAppender, b, contentType, appendTime)
 	if appErr != nil {
 		app.Rollback()
 		app = sl.appender(sl.parentCtx)
 		level.Debug(sl.l).Log("msg", "Append failed", "err", appErr)
 		// The append failed, probably due to a parse error or sample limit.
 		// Call sl.append again with an empty scrape to trigger stale markers.
-		if _, _, _, err := sl.append(app, []byte{}, "", appendTime); err != nil {
+		if _, _, _, err := sl.append(app, sl.eAppender, []byte{}, "", appendTime); err != nil {
 			app.Rollback()
 			app = sl.appender(sl.parentCtx)
 			level.Warn(sl.l).Log("msg", "Append failed", "err", err)
@@ -1218,7 +1228,7 @@ func (sl *scrapeLoop) endOfRunStaleness(last time.Time, ticker *time.Ticker, int
 			level.Warn(sl.l).Log("msg", "Stale commit failed", "err", err)
 		}
 	}()
-	if _, _, _, err = sl.append(app, []byte{}, "", staleTime); err != nil {
+	if _, _, _, err = sl.append(app, sl.eAppender, []byte{}, "", staleTime); err != nil {
 		app.Rollback()
 		app = sl.appender(sl.ctx)
 		level.Warn(sl.l).Log("msg", "Stale append failed", "err", err)
@@ -1249,7 +1259,7 @@ type appendErrors struct {
 	numOutOfBounds int
 }
 
-func (sl *scrapeLoop) append(app storage.Appender, b []byte, contentType string, ts time.Time) (total, added, seriesAdded int, err error) {
+func (sl *scrapeLoop) append(app storage.Appender, eApp storage.ExemplarAppender, b []byte, contentType string, ts time.Time) (total, added, seriesAdded int, err error) {
 	var (
 		p              = textparse.New(b, contentType)
 		defTime        = timestamp.FromTime(ts)
@@ -1318,7 +1328,7 @@ loop:
 					if !e.HasTs {
 						e.Ts = t
 					}
-					if err := app.AddExemplarFast(ce.ref, e); err != nil {
+					if err := sl.eAppender.AddExemplarFast(ce.ref, e); err != nil {
 						if err != storage.ErrDuplicateExemplar {
 							level.Debug(sl.l).Log("msg", "Unexpected error", "error", err, "seriesLabels", ce.lset, "exemplar", e)
 						}
@@ -1362,7 +1372,7 @@ loop:
 			}
 
 			if hasExemplar := p.Exemplar(&e); hasExemplar {
-				if err := app.AddExemplar(lset, e); err != nil {
+				if err := eApp.AddExemplar(lset, e); err != nil {
 					if err != storage.ErrDuplicateExemplar {
 						level.Debug(sl.l).Log("msg", "Unexpected error", "error", err, "seriesLabels", lset, "exemplar", e)
 					}

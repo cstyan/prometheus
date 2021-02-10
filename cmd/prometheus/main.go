@@ -419,7 +419,7 @@ func main() {
 		localStorage  = &readyStorage{}
 		scraper       = &readyScrapeManager{}
 		remoteStorage = remote.NewStorage(log.With(logger, "component", "remote"), prometheus.DefaultRegisterer, localStorage.StartTime, cfg.localStoragePath, time.Duration(cfg.RemoteFlushDeadline), scraper)
-		fanoutStorage = storage.NewFanout(logger, localStorage, remoteStorage)
+		fanoutStorage = storage.NewFanout(logger, localStorage, localStorage, remoteStorage)
 	)
 
 	var (
@@ -434,7 +434,7 @@ func main() {
 		ctxNotify, cancelNotify = context.WithCancel(context.Background())
 		discoveryManagerNotify  = discovery.NewManager(ctxNotify, log.With(logger, "component", "discovery manager notify"), discovery.Name("notify"))
 
-		scrapeManager = scrape.NewManager(log.With(logger, "component", "scrape manager"), fanoutStorage)
+		scrapeManager = scrape.NewManager(log.With(logger, "component", "scrape manager"), fanoutStorage, fanoutStorage.(storage.ExemplarAppendable))
 
 		opts = promql.EngineOpts{
 			Logger:                   log.With(logger, "component", "query engine"),
@@ -1112,6 +1112,14 @@ func (s *readyStorage) ExemplarQuerier(ctx context.Context) (storage.ExemplarQue
 func (s *readyStorage) Appender(ctx context.Context) storage.Appender {
 	if x := s.get(); x != nil {
 		return x.Appender(ctx)
+	}
+	return notReadyAppender{}
+}
+
+// Appender implements the Storage interface.
+func (s *readyStorage) ExemplarAppender() storage.ExemplarAppender {
+	if x := s.get(); x != nil {
+		return x.ExemplarAppender()
 	}
 	return notReadyAppender{}
 }

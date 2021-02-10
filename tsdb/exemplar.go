@@ -84,10 +84,6 @@ func NewCircularExemplarStorage(len int, reg prometheus.Registerer) (*CircularEx
 	}, nil
 }
 
-func (ce *CircularExemplarStorage) Appender() storage.ExemplarAppender {
-	return ce
-}
-
 func (ce *CircularExemplarStorage) ExemplarAppender() storage.ExemplarAppender {
 	return ce
 }
@@ -197,8 +193,7 @@ func (ce *CircularExemplarStorage) AddExemplar(l labels.Labels, e exemplar.Exemp
 	return nil
 }
 
-// For use in tests, clears the entire exemplar storage.
-func (ce *CircularExemplarStorage) Reset() {
-	ce.exemplars = make([]*circularBufferEntry, len(ce.exemplars))
-	ce.index = make(map[string]*indexEntry)
+func (ce *CircularExemplarStorage) AddExemplarFast(ref uint64, e exemplar.Exemplar) error {
+	// no op
+	return nil
 }

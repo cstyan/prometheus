@@ -28,8 +28,9 @@ import (
 type fanout struct {
 	logger log.Logger
 
-	primary     Storage
-	secondaries []Storage
+	primary         Storage
+	exemplarPrimary ExemplarAppendable
+	secondaries     []Storage
 }
 
 // NewFanout returns a new fanout Storage, which proxies reads and writes
@@ -41,11 +42,12 @@ type fanout struct {
 // and the error from the secondary querier will be returned as a warning.
 //
 // NOTE: In the case of Prometheus, it treats all remote storages as secondary / best effort.
-func NewFanout(logger log.Logger, primary Storage, secondaries ...Storage) Storage {
+func NewFanout(logger log.Logger, primary Storage, ePrimary ExemplarAppendable, secondaries ...Storage) Storage {
 	return &fanout{
-		logger:      logger,
-		primary:     primary,
-		secondaries: secondaries,
+		logger:          logger,
+		primary:         primary,
+		exemplarPrimary: ePrimary,
+		secondaries:     secondaries,
 	}
 }
 
@@ -127,6 +129,10 @@ func (f *fanout) Appender(ctx context.Context) Appender {
 	}
 }
 
+func (f *fanout) ExemplarAppender() ExemplarAppender {
+	return f.exemplarPrimary.ExemplarAppender()
+}
+
 // Close closes the storage and all its underlying resources.
 func (f *fanout) Close() error {
 	errs := tsdb_errors.NewMulti(f.primary.Close())
@@ -140,8 +146,9 @@ func (f *fanout) Close() error {
 type fanoutAppender struct {
 	logger log.Logger
 
-	primary     Appender
-	secondaries []Appender
+	primary         Appender
+	exemplarPrimary ExemplarAppender
+	secondaries     []Appender
 }
 
 func (f *fanoutAppender) Add(l labels.Labels, t int64, v float64) (uint64, error) {
@@ -172,29 +179,13 @@ func (f *fanoutAppender) AddFast(ref uint64, t int64, v float64) error {
 }
 
 func (f *fanoutAppender) AddExemplar(l labels.Labels, e exemplar.Exemplar) error {
-	if err := f.primary.AddExemplar(l, e); err != nil {
-		return err
-	}
-
-	for _, appender := range f.secondaries {
-		if err := appender.AddExemplar(l, e); err != nil {
-			return err
-		}
-	}
-	return nil
+	// todo: properly hook up secondary exemplar storages
+	return f.exemplarPrimary.AddExemplar(l, e)
 }
 
 func (f *fanoutAppender) AddExemplarFast(ref uint64, e exemplar.Exemplar) error {
-	if err := f.primary.AddExemplarFast(ref, e); err != nil {
-		return err
-	}
-
-	for _, appender := range f.secondaries {
-		if err := appender.AddExemplarFast(ref, e); err != nil {
-			return err
-		}
-	}
-	return nil
+	// todo: properly hook up secondary exemplar storages
+	return f.exemplarPrimary.AddExemplarFast(ref, e)
 }
 
 func (f *fanoutAppender) Commit() (err error) {
