@@ -495,6 +495,11 @@ func (h *Head) loadWAL(r *wal.Reader, multiRef map[uint64]uint64, mmappedChunks 
 				return []tombstones.Stone{}
 			},
 		}
+		exemplarsPool = sync.Pool{
+			New: func() interface{} {
+				return []record.RefExemplar{}
+			},
+		}
 	)
 
 	defer func() {
@@ -563,6 +568,18 @@ func (h *Head) loadWAL(r *wal.Reader, multiRef map[uint64]uint64, mmappedChunks 
 					return
 				}
 				decoded <- tstones
+			case record.Exemplars:
+				exemplars := exemplarsPool.Get().([]record.RefExemplar)[:0]
+				exemplars, err = dec.Exemplars(rec, exemplars)
+				if err != nil {
+					decodeErr = &wal.CorruptionErr{
+						Err:     errors.Wrap(err, "decode exemplars"),
+						Segment: r.Segment(),
+						Offset:  r.Offset(),
+					}
+					return
+				}
+				decoded <- exemplars
 			default:
 				// Noop.
 			}
@@ -652,6 +669,22 @@ Outer:
 			}
 			//nolint:staticcheck // Ignore SA6002 relax staticcheck verification.
 			tstonesPool.Put(v)
+		case []record.RefExemplar:
+			// todo (Callum): do we expect exemplar records to reach anywhere near the same level as samples,
+			// should they be processed in batches the same way samples are?
+			for _, e := range v {
+				// get labels
+				s := h.series.getByID(e.Ref)
+				if s == nil {
+					unknownRefs.Inc()
+					continue
+				}
+				if e.T < h.minValidTime.Load() {
+					continue
+				}
+				h.exemplars.AddExemplar(s.lset, exemplar.Exemplar{Ts: e.T, Value: e.V, Labels: e.Labels})
+			}
+			exemplarsPool.Put(v)
 		default:
 			panic(fmt.Errorf("unexpected decoded type: %T", d))
 		}
