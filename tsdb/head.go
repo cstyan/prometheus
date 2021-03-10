@@ -682,8 +682,14 @@ Outer:
 				if e.T < h.minValidTime.Load() {
 					continue
 				}
-				h.exemplars.AddExemplar(s.lset, exemplar.Exemplar{Ts: e.T, Value: e.V, Labels: e.Labels})
+				// At the moment the only possible error here is out of order exemplars, which we shouldn't see when
+				// replaying the WAL, so lets just log the error if it's not that type.
+				err = h.exemplars.AddExemplar(s.lset, exemplar.Exemplar{Ts: e.T, Value: e.V, Labels: e.Labels})
+				if err != nil && err == storage.ErrOutOfOrderExemplar {
+					level.Warn(h.logger).Log("msg", "unexpected error when replaying WAL on exemplar record", "err", err)
+				}
 			}
+			//nolint:staticcheck // Ignore SA6002 relax staticcheck verification.
 			exemplarsPool.Put(v)
 		default:
 			panic(fmt.Errorf("unexpected decoded type: %T", d))

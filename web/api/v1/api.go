@@ -130,11 +130,6 @@ type RuntimeInfo struct {
 	StorageRetention    string    `json:"storageRetention"`
 }
 
-type exemplarData struct {
-	SeriesLabels labels.Labels                      `json:"seriesLabels"`
-	Exemplars    []exemplar.ExemplarScrapeTimestamp `json:"exemplars"`
-}
-
 type response struct {
 	Status    status      `json:"status"`
 	Data      interface{} `json:"data,omitempty"`

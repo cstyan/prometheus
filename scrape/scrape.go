@@ -709,7 +709,6 @@ type scrapeLoop struct {
 	forcedErrMtx    sync.Mutex
 
 	appender            func(ctx context.Context) storage.Appender
-	exemplarAppender    func() storage.ExemplarAppender
 	sampleMutator       labelsMutator
 	reportSampleMutator labelsMutator
 
